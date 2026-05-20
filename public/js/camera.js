@@ -23,6 +23,7 @@ export async function enter() {
   }
   stage.hidden = false;
   active = true;
+  document.body.classList.add('camera');
   hud.buildBaseHud();
   hud.setReadout('Vision module engaged. Awaiting command — try "analyze product" or "open google".');
   return true;
@@ -32,6 +33,7 @@ export function exit() {
   if (!active) return;
   active = false;
   stage.hidden = true;
+  document.body.classList.remove('camera');
   hud.clearReticles();
   if (stream) {
     stream.getTracks().forEach(t => t.stop());
