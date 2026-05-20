@@ -149,7 +149,7 @@ window.addEventListener('friday:command', (e) => handleSpokenCommand(e.detail));
 window.addEventListener('friday:wake', () => {
   setStatus('listening', 'listening');
   voice.stopSpeaking();
-  // gentle acknowledgement (no full TTS to keep latency low)
+  addSys('— wake — listening for command…');
   hud.setReadout?.('Wake acknowledged. Awaiting command.');
 });
 window.addEventListener('friday:shutdown', () => {

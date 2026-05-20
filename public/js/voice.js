@@ -1,19 +1,25 @@
+// TTS output. Riva (server-side) preferred; Web Speech API as fallback.
+// Locked to American English: en-US lang + best-available US voice +
+// natural cadence + text normalization for cleaner pronunciation.
+
 import * as api from './api.js';
 
 const audioEl = document.getElementById('tts-audio');
 
 let actx = null;
 let analyser = null;
-let srcNode = null;
 let lastAmp = 0;
 let useFallback = false;
+let pickedVoice = null;
+let warmedUp = false;
 
+// ---------- Web Audio analyser for lip-sync ----------
 function ensureCtx() {
   if (actx) return;
   actx = new (window.AudioContext || window.webkitAudioContext)();
   analyser = actx.createAnalyser();
   analyser.fftSize = 256;
-  srcNode = actx.createMediaElementSource(audioEl);
+  const srcNode = actx.createMediaElementSource(audioEl);
   srcNode.connect(analyser);
   analyser.connect(actx.destination);
   const buf = new Uint8Array(analyser.frequencyBinCount);
@@ -35,51 +41,179 @@ function ensureCtx() {
   loop();
 }
 
-function stripEmotion(text) {
-  const m = text.match(/\[\[emotion:([a-z]+)\]\]/i);
-  if (m) {
-    window.dispatchEvent(new CustomEvent('friday:emotion', { detail: m[1].toLowerCase() }));
-    return text.replace(m[0], '').trim();
+// ---------- voice picker ----------
+const PREFERRED_VOICES = [
+  /^Google US English$/i,
+  /Microsoft Aria.*United States/i,
+  /Microsoft Jenny.*United States/i,
+  /Microsoft Guy.*United States/i,
+  /^Samantha$/i,
+  /^Allison$/i,
+  /^Ava$/i,
+];
+
+function pickBestVoice() {
+  const voices = (window.speechSynthesis?.getVoices?.() || []).filter(Boolean);
+  if (!voices.length) return null;
+  for (const rx of PREFERRED_VOICES) {
+    const v = voices.find((vv) => rx.test(vv.name));
+    if (v) return v;
   }
-  return text;
+  const usExact = voices.find((v) => v.lang === 'en-US');
+  if (usExact) return usExact;
+  const anyEn = voices.find((v) => /^en[-_]/i.test(v.lang));
+  return anyEn || voices[0];
 }
 
-function speakFallback(text) {
+function refreshVoice() {
+  const v = pickBestVoice();
+  if (v && v !== pickedVoice) {
+    pickedVoice = v;
+    try { console.log('[voice] using', v.name, v.lang); } catch {}
+  }
+}
+
+if (typeof window !== 'undefined' && window.speechSynthesis) {
+  refreshVoice();
+  try { window.speechSynthesis.onvoiceschanged = refreshVoice; } catch {}
+}
+
+// ---------- one-time warm-up on first user gesture ----------
+function warmUp() {
+  if (warmedUp) return;
+  warmedUp = true;
+  try {
+    const u = new SpeechSynthesisUtterance(' ');
+    u.lang = 'en-US';
+    u.volume = 0;
+    window.speechSynthesis.speak(u);
+  } catch {}
+  // Resume an AudioContext that was suspended due to autoplay policy.
+  try { actx?.resume?.(); } catch {}
+}
+if (typeof window !== 'undefined') {
+  const onFirstGesture = () => {
+    warmUp();
+    window.removeEventListener('click', onFirstGesture);
+    window.removeEventListener('keydown', onFirstGesture);
+    window.removeEventListener('touchstart', onFirstGesture);
+  };
+  window.addEventListener('click', onFirstGesture);
+  window.addEventListener('keydown', onFirstGesture);
+  window.addEventListener('touchstart', onFirstGesture);
+}
+
+// ---------- text normalization ----------
+const ACRONYMS = {
+  AI: 'A.I.', API: 'A.P.I.', URL: 'U.R.L.', UI: 'U.I.', UX: 'U.X.',
+  TTS: 'T.T.S.', STT: 'S.T.T.', HUD: 'H.U.D.', VR: 'V.R.', AR: 'A.R.',
+  LLM: 'L.L.M.', CPU: 'C.P.U.', GPU: 'G.P.U.', RAM: 'R.A.M.', SSD: 'S.S.D.',
+  USB: 'U.S.B.', PDF: 'P.D.F.', HTML: 'H.T.M.L.', CSS: 'C.S.S.',
+  JS: 'JavaScript', SQL: 'S.Q.L.', JSON: 'jay-son', HTTP: 'H.T.T.P.',
+  HTTPS: 'H.T.T.P.S.', NIM: 'N.I.M.',
+};
+
+function normalizeForSpeech(text) {
+  if (!text) return '';
+  let s = String(text);
+  // Strip emotion tag.
+  s = s.replace(/\[\[emotion:[a-z]+\]\]/ig, '');
+  // Strip markdown emphasis and inline code.
+  s = s.replace(/```[\s\S]*?```/g, ' ');                  // code blocks → drop
+  s = s.replace(/`([^`]+)`/g, '$1');                       // inline code → text
+  s = s.replace(/\*\*([^*]+)\*\*/g, '$1');                 // bold
+  s = s.replace(/(?<!\*)\*(?!\*)([^*]+)\*(?!\*)/g, '$1');  // italic
+  s = s.replace(/^[ \t]*[-*•]\s+/gm, '');                  // list bullets
+  s = s.replace(/^#{1,6}\s+/gm, '');                       // markdown headings
+  // Punctuation normalization.
+  s = s.replace(/[—–]/g, ', ');
+  s = s.replace(/\.{3,}/g, ', ');
+  s = s.replace(/\s+&\s+/g, ' and ');
+  // Acronyms — whole-word only.
+  s = s.replace(/\b([A-Z]{2,5})\b/g, (m) => ACRONYMS[m] || m);
+  // Collapse whitespace.
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
+function dispatchEmotion(text) {
+  const m = text.match(/\[\[emotion:([a-z]+)\]\]/i);
+  if (m) window.dispatchEvent(new CustomEvent('friday:emotion', { detail: m[1].toLowerCase() }));
+}
+
+// ---------- Web Speech speak (sentence queue) ----------
+function splitSentences(text) {
+  // Keep punctuation with the sentence; split on . ! ? followed by space/newline.
+  const out = [];
+  const re = /[^.!?\n]+[.!?]?(?:\s+|$)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const seg = m[0].trim();
+    if (seg) out.push(seg);
+  }
+  return out.length ? out : [text];
+}
+
+function speakSentenceWebSpeech(text) {
   return new Promise((resolve) => {
+    if (!window.speechSynthesis) { resolve(); return; }
+    if (!pickedVoice) refreshVoice();
     try {
       const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.05; u.pitch = 1.05;
-      u.onstart = () => window.dispatchEvent(new CustomEvent('friday:speaking', { detail: true }));
-      u.onend = () => { window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false })); resolve(); };
-      u.onerror = () => { window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false })); resolve(); };
-      // synthetic amp loop
-      const start = performance.now();
-      const fakeLoop = () => {
-        if (!speechSynthesis.speaking) { lastAmp *= 0.85; return; }
-        const t = (performance.now() - start) / 200;
-        lastAmp = 0.35 + 0.25 * Math.abs(Math.sin(t)) + 0.15 * Math.random();
-        window.dispatchEvent(new CustomEvent('friday:amp', { detail: lastAmp }));
-        requestAnimationFrame(fakeLoop);
-      };
-      fakeLoop();
-      speechSynthesis.cancel();
-      speechSynthesis.speak(u);
-    } catch (e) { resolve(); }
+      u.lang = 'en-US';
+      if (pickedVoice) u.voice = pickedVoice;
+      u.rate = 0.98;
+      u.pitch = 1.0;
+      u.volume = 1.0;
+      u.onend = () => resolve();
+      u.onerror = () => resolve();
+      window.speechSynthesis.speak(u);
+    } catch { resolve(); }
   });
 }
 
-export async function speak(text) {
-  const clean = stripEmotion(text);
+function speakFallback(text) {
+  return new Promise(async (resolve) => {
+    try { window.speechSynthesis?.cancel?.(); } catch {}
+    window.dispatchEvent(new CustomEvent('friday:speaking', { detail: true }));
+    // Synthetic amplitude loop for lip-sync since Web Speech audio is not
+    // exposed via Web Audio.
+    let synthRunning = true;
+    const start = performance.now();
+    const fakeLoop = () => {
+      if (!synthRunning) { lastAmp *= 0.85; return; }
+      const t = (performance.now() - start) / 180;
+      lastAmp = 0.32 + 0.28 * Math.abs(Math.sin(t)) + 0.12 * Math.random();
+      window.dispatchEvent(new CustomEvent('friday:amp', { detail: lastAmp }));
+      requestAnimationFrame(fakeLoop);
+    };
+    fakeLoop();
+    const sentences = splitSentences(text);
+    for (const s of sentences) {
+      await speakSentenceWebSpeech(s);
+    }
+    synthRunning = false;
+    window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false }));
+    resolve();
+  });
+}
+
+// ---------- public speak ----------
+export async function speak(rawText) {
+  if (!rawText) return;
+  dispatchEmotion(rawText);
+  const clean = normalizeForSpeech(rawText);
   if (!clean) return;
   ensureCtx();
   if (useFallback) return speakFallback(clean);
   try {
     const res = await api.tts(clean);
-    if (res.fallback) { useFallback = true; return speakFallback(clean); }
+    if (res?.fallback) { useFallback = true; return speakFallback(clean); }
     return await new Promise((resolve) => {
       audioEl.src = res.url;
-      audioEl.onended = () => { window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false })); resolve(); };
-      audioEl.onerror = () => { window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false })); resolve(); };
+      const done = () => { window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false })); resolve(); };
+      audioEl.onended = done;
+      audioEl.onerror = done;
       audioEl.play()
         .then(() => window.dispatchEvent(new CustomEvent('friday:speaking', { detail: true })))
         .catch(() => { useFallback = true; speakFallback(clean).then(resolve); });
@@ -92,12 +226,12 @@ export async function speak(text) {
 
 export function stopSpeaking() {
   try { audioEl.pause(); audioEl.currentTime = 0; } catch {}
-  try { speechSynthesis.cancel(); } catch {}
+  try { window.speechSynthesis?.cancel?.(); } catch {}
   window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false }));
 }
 
 export function isSpeaking() {
-  return (audioEl && !audioEl.paused) || (window.speechSynthesis && speechSynthesis.speaking);
+  return (audioEl && !audioEl.paused) || !!(window.speechSynthesis && window.speechSynthesis.speaking);
 }
 
 export function setFallback(v) { useFallback = !!v; }

@@ -28,8 +28,8 @@ setInterval(() => {
       triggerStart = 0;
       voice.stopSpeaking();
       window.dispatchEvent(new CustomEvent('friday:barge'));
-      // Capture the interrupting utterance, dispatch as command
-      captureCommand(3200).then((txt) => {
+      // VAD-endpointed capture of the interrupting utterance.
+      captureCommand().then((txt) => {
         if (txt && txt.trim()) window.dispatchEvent(new CustomEvent('friday:command', { detail: txt.trim() }));
       });
     }
