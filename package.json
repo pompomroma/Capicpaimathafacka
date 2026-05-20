@@ -1,0 +1,26 @@
+{
+  "name": "friday-ai-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Jarvis-style voice+vision AI assistant powered by NVIDIA NIM",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.3.0",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "form-data": "^4.0.1",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.0",
+    "node-fetch": "^2.7.0"
+  }
+}

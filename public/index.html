@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Friday</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="boot">
+  <!-- 3D particle face canvas -->
+  <canvas id="face-canvas"></canvas>
+
+  <!-- Status bar -->
+  <header id="topbar">
+    <div class="brand">F<span>·</span>R<span>·</span>I<span>·</span>D<span>·</span>A<span>·</span>Y</div>
+    <div id="status">
+      <span id="status-dot"></span>
+      <span id="status-text">offline</span>
+    </div>
+    <div class="topbar-spacer"></div>
+    <div id="user-box">
+      <span id="user-email">—</span>
+      <button id="logout-btn" class="btn ghost">log out</button>
+    </div>
+  </header>
+
+  <!-- Camera + HUD -->
+  <section id="camera-stage" hidden>
+    <video id="camera-video" autoplay playsinline muted></video>
+    <svg id="hud-overlay" preserveAspectRatio="none" viewBox="0 0 1000 600"></svg>
+    <div id="hud-readout"></div>
+    <div id="mini-browser" hidden>
+      <div class="mb-bar">
+        <span id="mb-title">browser</span>
+        <button id="mb-close" class="btn ghost small">close</button>
+      </div>
+      <iframe id="mb-frame" referrerpolicy="no-referrer" sandbox="allow-scripts allow-forms allow-same-origin allow-popups"></iframe>
+    </div>
+  </section>
+
+  <!-- Chat panel -->
+  <section id="chat-panel">
+    <div id="chat-log" aria-live="polite"></div>
+    <form id="chat-form">
+      <input id="chat-input" type="text" autocomplete="off" placeholder="type to Friday…" />
+      <button type="submit" class="btn primary">send</button>
+    </form>
+  </section>
+
+  <!-- Codegen panel -->
+  <section id="codegen-panel" hidden>
+    <header class="panel-head">
+      <h2>generate</h2>
+      <button class="btn ghost small" data-close="codegen-panel">×</button>
+    </header>
+    <form id="codegen-form">
+      <textarea id="codegen-goal" rows="3" placeholder="describe what to build…"></textarea>
+      <div class="row">
+        <button id="codegen-run" type="submit" class="btn primary">build</button>
+        <button id="codegen-preview" type="button" class="btn">preview</button>
+        <button id="codegen-download" type="button" class="btn">download .zip</button>
+      </div>
+    </form>
+    <div id="codegen-status" class="muted"></div>
+    <div id="codegen-files" class="muted small"></div>
+    <iframe id="codegen-iframe" sandbox="allow-scripts allow-forms" hidden></iframe>
+  </section>
+
+  <!-- History panel -->
+  <section id="history-panel" hidden>
+    <header class="panel-head">
+      <h2>history</h2>
+      <button class="btn ghost small" data-close="history-panel">×</button>
+    </header>
+    <div class="tabs">
+      <button class="tab active" data-tab="chat-history">chats</button>
+      <button class="tab" data-tab="creation-history">creations</button>
+    </div>
+    <ul id="chat-history" class="hist-list"></ul>
+    <ul id="creation-history" class="hist-list" hidden></ul>
+  </section>
+
+  <!-- Control dock -->
+  <nav id="dock">
+    <button id="btn-mic" class="dock-btn" title="mute mic">
+      <span class="ico">🎙</span><span class="lbl">mute</span>
+    </button>
+    <button id="btn-wake" class="dock-btn" title="activate Friday">
+      <span class="ico">⏻</span><span class="lbl">wake</span>
+    </button>
+    <button id="btn-camera" class="dock-btn" title="camera mode">
+      <span class="ico">◉</span><span class="lbl">vision</span>
+    </button>
+    <button id="btn-vr" class="dock-btn" title="VR mode" hidden>
+      <span class="ico">◫</span><span class="lbl">vr</span>
+    </button>
+    <button id="btn-codegen" class="dock-btn" title="code generation">
+      <span class="ico">⌬</span><span class="lbl">build</span>
+    </button>
+    <button id="btn-history" class="dock-btn" title="history">
+      <span class="ico">≡</span><span class="lbl">history</span>
+    </button>
+  </nav>
+
+  <audio id="tts-audio" preload="auto" crossorigin="anonymous"></audio>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

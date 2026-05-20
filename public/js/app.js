@@ -1,0 +1,267 @@
+import * as api from './api.js';
+import * as voice from './voice.js';
+import * as wake from './wake.js';
+import './barge.js';
+import * as face from './face.js';
+import * as hud from './hud.js';
+import * as camera from './camera.js';
+import * as mb from './miniBrowser.js';
+import * as vr from './vr.js';
+import * as codegen from './codegen.js';
+
+// ---------- DOM ----------
+const $ = (id) => document.getElementById(id);
+const chatLog = $('chat-log');
+const chatForm = $('chat-form');
+const chatInput = $('chat-input');
+const statusText = $('status-text');
+const userEmail = $('user-email');
+const btnMic = $('btn-mic');
+const btnWake = $('btn-wake');
+const btnCamera = $('btn-camera');
+const btnVR = $('btn-vr');
+const btnCodegen = $('btn-codegen');
+const btnHistory = $('btn-history');
+const codegenPanel = $('codegen-panel');
+const historyPanel = $('history-panel');
+const chatHistoryList = $('chat-history');
+const creationHistoryList = $('creation-history');
+
+// ---------- Auth gate ----------
+(async () => {
+  const user = await api.me();
+  if (!user) { location.href = '/login'; return; }
+  userEmail.textContent = user.email;
+  init();
+})();
+
+function setStatus(state, label) {
+  ['online', 'listening', 'speaking', 'alert'].forEach(c => document.body.classList.remove(c));
+  if (state) document.body.classList.add(state);
+  if (label) statusText.textContent = label;
+}
+
+// ---------- Chat ----------
+function addBubble(role, text) {
+  const b = document.createElement('div');
+  b.className = 'bubble ' + role;
+  b.textContent = text;
+  chatLog.appendChild(b);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return b;
+}
+function addSys(text) { return addBubble('sys', text); }
+
+let inflightBubble = null;
+async function sendMessage(message) {
+  if (!message || !message.trim()) return;
+  addBubble('user', message);
+  inflightBubble = addBubble('friday', '');
+  let buf = '';
+  try {
+    for await (const delta of api.chatStream(message)) {
+      buf += delta;
+      if (inflightBubble) {
+        // strip emotion tag from visible text
+        inflightBubble.textContent = buf.replace(/\[\[emotion:[a-z]+\]\]/i, '').trim();
+        chatLog.scrollTop = chatLog.scrollHeight;
+      }
+    }
+  } catch (e) {
+    if (inflightBubble) inflightBubble.textContent = '(error: ' + e.message + ')';
+    return;
+  }
+  if (buf.trim()) await voice.speak(buf);
+}
+
+chatForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const v = chatInput.value.trim();
+  if (!v) return;
+  chatInput.value = '';
+  sendMessage(v);
+});
+
+// ---------- Voice command routing ----------
+function tryLocalCommand(text) {
+  const t = text.toLowerCase().trim();
+  if (!t) return false;
+
+  // Camera mode
+  if (/(camera|vision|visual)\s*mode/.test(t) || /enter (camera|vision)/.test(t)) {
+    camera.enter().then((ok) => { if (ok) { btnCamera.classList.add('active'); btnVR.hidden = false; } });
+    return true;
+  }
+  if (/exit (camera|vision)/.test(t) || /close (camera|vision)/.test(t)) {
+    camera.exit(); btnCamera.classList.remove('active'); btnVR.hidden = true; vr.setVR(false);
+    return true;
+  }
+
+  // VR mode
+  if (/vr\s*mode|cardboard/.test(t)) {
+    const on = vr.toggle();
+    addSys(on ? 'VR mode engaged.' : 'VR mode disengaged.');
+    return true;
+  }
+  if (/exit vr/.test(t)) { vr.setVR(false); return true; }
+
+  // Mini-browser open / close
+  const openMatch = t.match(/\bopen\s+(google|duckduckgo|ddg|bing|youtube|wikipedia|wiki)(?:\s+(?:for|about)?\s*(.+))?$/);
+  if (openMatch) {
+    const engine = openMatch[1];
+    const query = (openMatch[2] || '').trim();
+    mb.open(engine, query);
+    addSys(`Opening ${engine}${query ? ' for "' + query + '"' : ''}.`);
+    return true;
+  }
+  if (/close (web|browser)/.test(t)) { mb.close(); return true; }
+
+  // Vision commands
+  const visionMatch = t.match(/\b(?:analyze|analyse|scan)\b\s+(?:this\s+|the\s+)?(product|medication|med|movement|material|math|mathematics)/);
+  if (visionMatch) {
+    let cmd = visionMatch[1];
+    if (cmd === 'med') cmd = 'medication';
+    if (cmd === 'mathematics') cmd = 'math';
+    camera.analyze(cmd, t).then((content) => {
+      if (content) {
+        addBubble('friday', content.replace(/\[\[emotion:[a-z]+\]\]/i, '').trim());
+        voice.speak(content);
+      }
+    });
+    return true;
+  }
+
+  // Mute
+  if (/^mute(\s+mic)?$/.test(t)) { setMute(true); return true; }
+  if (/^unmute/.test(t)) { setMute(false); return true; }
+
+  return false;
+}
+
+function handleSpokenCommand(text) {
+  if (!text) return;
+  if (tryLocalCommand(text)) return;
+  if (voice.isSpeaking()) voice.stopSpeaking();
+  sendMessage(text);
+}
+
+window.addEventListener('friday:command', (e) => handleSpokenCommand(e.detail));
+window.addEventListener('friday:wake', () => {
+  setStatus('listening', 'listening');
+  voice.stopSpeaking();
+  // gentle acknowledgement (no full TTS to keep latency low)
+  hud.setReadout?.('Wake acknowledged. Awaiting command.');
+});
+window.addEventListener('friday:shutdown', () => {
+  addSys('— shutdown received —');
+  voice.speak('Standing down, sir. Disconnecting all systems.');
+  wake.stop();
+  btnWake.classList.remove('active');
+  setStatus(null, 'offline');
+});
+window.addEventListener('friday:status', (e) => { setStatus(null, e.detail); });
+window.addEventListener('friday:speaking', (e) => {
+  if (e.detail) setStatus('speaking', 'speaking');
+  else if (wake.isRunning()) setStatus('listening', 'listening');
+});
+window.addEventListener('friday:barge', () => {
+  addSys('— interrupted —');
+});
+
+// ---------- Mute / wake buttons ----------
+function setMute(v) {
+  wake.setMuted(v);
+  btnMic.classList.toggle('muted', v);
+  btnMic.querySelector('.lbl').textContent = v ? 'unmute' : 'mute';
+}
+btnMic.addEventListener('click', () => setMute(!wake.getMuted()));
+
+btnWake.addEventListener('click', async () => {
+  if (wake.isRunning()) {
+    wake.stop(); btnWake.classList.remove('active');
+  } else {
+    await wake.start();
+    if (wake.isRunning()) {
+      btnWake.classList.add('active');
+      setStatus('listening', 'listening');
+      addSys('Listening. Say "Friday" to begin.');
+    }
+  }
+});
+
+// ---------- Camera button ----------
+btnCamera.addEventListener('click', async () => {
+  if (camera.isActive()) {
+    camera.exit(); btnCamera.classList.remove('active'); btnVR.hidden = true; vr.setVR(false);
+  } else {
+    const ok = await camera.enter();
+    if (ok) { btnCamera.classList.add('active'); btnVR.hidden = false; }
+  }
+});
+
+// ---------- VR button ----------
+btnVR.addEventListener('click', () => vr.toggle());
+
+// ---------- Panels ----------
+function togglePanel(panel, btn) {
+  const open = !panel.hidden;
+  panel.hidden = open;
+  btn.classList.toggle('active', !open);
+}
+btnCodegen.addEventListener('click', () => togglePanel(codegenPanel, btnCodegen));
+btnHistory.addEventListener('click', async () => {
+  togglePanel(historyPanel, btnHistory);
+  if (!historyPanel.hidden) loadHistory();
+});
+document.querySelectorAll('[data-close]').forEach(el => {
+  el.addEventListener('click', () => {
+    const p = document.getElementById(el.dataset.close);
+    p.hidden = true;
+  });
+});
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    chatHistoryList.hidden = tab.dataset.tab !== 'chat-history';
+    creationHistoryList.hidden = tab.dataset.tab !== 'creation-history';
+  });
+});
+
+async function loadHistory() {
+  const ch = await api.chatHistory();
+  chatHistoryList.innerHTML = (ch.messages || [])
+    .map(m => `<li><span style="color:var(--cyan)">${m.role}</span>: ${escape(m.content).slice(0, 240)}</li>`).join('') || '<li class="muted">no chats yet</li>';
+  const cr = await api.creationHistory();
+  creationHistoryList.innerHTML = (cr.creations || [])
+    .map(c => `<li data-id="${c.id}">⌬ ${escape(c.goal).slice(0, 80)} <span class="muted small">${new Date(c.ts).toLocaleString()}</span></li>`).join('') || '<li class="muted">no creations yet</li>';
+  creationHistoryList.querySelectorAll('li[data-id]').forEach(li => {
+    li.addEventListener('click', async () => {
+      try {
+        const rec = await api.creation(li.dataset.id);
+        codegen.loadCreation(rec);
+        historyPanel.hidden = true; btnHistory.classList.remove('active');
+        codegenPanel.hidden = false; btnCodegen.classList.add('active');
+      } catch (e) { /* ignore */ }
+    });
+  });
+}
+function escape(s) { return String(s || '').replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c])); }
+
+// ---------- Logout ----------
+$('logout-btn').addEventListener('click', async () => {
+  await api.logout(); location.href = '/login';
+});
+
+// ---------- Boot ----------
+function init() {
+  const canvas = document.getElementById('face-canvas');
+  face.init(canvas);
+  document.body.classList.remove('boot');
+  setStatus('online', 'standby');
+  addSys('Friday online. Press the power icon to begin listening, or type below.');
+  // Restore last 8 chat messages
+  api.chatHistory().then(({ messages = [] }) => {
+    messages.slice(-8).forEach(m => addBubble(m.role === 'assistant' ? 'friday' : m.role, (m.content || '').replace(/\[\[emotion:[a-z]+\]\]/i, '').trim()));
+  });
+}
