@@ -1,20 +1,32 @@
-// Voice input pipeline.
+// Voice input pipeline (round 3).
 //
-// Primary listener: Web Speech API (continuous, interim results, en-US).
-//   - Cheap, low-latency, runs entirely in the browser.
-//   - Used for wake-word detection AND fallback command transcription.
-// On wake: open a VAD-endpointed MediaRecorder, ship to /api/stt for high-
-//   quality Riva transcription. If Riva is unavailable, fall back to the
-//   next Web Speech `isFinal` result.
-// Echo gating: pause Web Speech while Friday is speaking (so the mic does
-//   not re-capture TTS output and trigger itself).
+// Web Speech API is the SOLE realtime source for both wake detection AND
+// command capture. The recognizer is NEVER stopped during command capture,
+// so a final result containing the user's command is guaranteed to deliver.
+//
+// Wake fires on FINAL results only (no interims), eliminating the
+// same-utterance race where firing on an interim would abort the recognizer
+// before the still-pending final arrived.
+//
+// Riva STT is kept as an OPTIONAL parallel quality upgrade: a VAD-endpointed
+// MediaRecorder runs alongside Web Speech and races with it; whichever
+// returns a non-empty transcript first wins. If Riva is unreachable (503
+// fallback), Web Speech still wins — the user is never blocked.
+//
+// All key state transitions are logged with a [friday] prefix so the user
+// can diagnose issues from the browser console without reading source.
 
 import * as api from './api.js';
 
+const LOG = (...a) => { try { console.log('[friday]', ...a); } catch {} };
+
 // ---- wake matching ----
-// Be permissive: ASR commonly mistranscribes "Friday" as one of these.
 const WAKE_RE = /(^|\W)(hey\s+|okay\s+|ok\s+)?(friday|fri[\s-]?day|fry[\s-]?day|free\s+day|frieda|fridey|frydae|fryde|fride|priday|pry\s+day)(\W|$)/i;
 const SHUTDOWN_PHRASE = 'disconnect all systems';
+
+// ---- timing ----
+const COMMAND_TIMEOUT_MS = 10000; // how long to wait for a command after bare wake
+const RIVA_DEADLINE_MS   = 4000;  // give Riva up to this long; otherwise Web Speech wins
 
 // ---- state ----
 let stream = null;
@@ -22,19 +34,18 @@ let bargeAnalyser = null;
 let bargeAmp = 0;
 let muted = false;
 let running = false;
-let speaking = false;        // gated by friday:speaking events
+let speaking = false;
 let webspeech = null;
-let recognizerActive = false; // whether Web Speech is currently started
+let recognizerActive = false;
 let resumeTimer = null;
-let mode = 'idle';            // 'idle' | 'listening' | 'capturing'
+let mode = 'idle';        // 'idle' | 'listening' | 'capturing'
 
-// While capturing, we want the next Web Speech final result to be treated
-// as the command (fallback path).
 let pendingCommandResolver = null;
+let commandTimeoutHandle = null;
 
 const emit = (name, detail) => window.dispatchEvent(new CustomEvent('friday:' + name, { detail }));
 
-// ---------- microphone ----------
+// ---------- microphone + barge analyser ----------
 async function getMic() {
   if (stream) return stream;
   stream = await navigator.mediaDevices.getUserMedia({
@@ -80,7 +91,7 @@ function makeRecognizer() {
     }
   };
   r.onerror = (ev) => {
-    // 'no-speech', 'audio-capture', 'not-allowed', 'aborted', ...
+    LOG('recognizer error:', ev.error);
     if (ev.error === 'not-allowed' || ev.error === 'audio-capture') {
       emit('status', 'mic blocked');
       running = false;
@@ -88,10 +99,13 @@ function makeRecognizer() {
   };
   r.onend = () => {
     recognizerActive = false;
+    LOG('recognizer ended, mode=', mode);
     if (running && !muted && !speaking) {
-      // Browsers stop the recognizer every ~1 minute. Restart with backoff.
       clearTimeout(resumeTimer);
-      resumeTimer = setTimeout(() => safeStartRecognizer(), 150);
+      // While capturing, restart with zero delay so a follow-up command
+      // is not lost during the engine cycle.
+      const delay = mode === 'capturing' ? 0 : 120;
+      resumeTimer = setTimeout(() => safeStartRecognizer(), delay);
     }
   };
   return r;
@@ -99,86 +113,122 @@ function makeRecognizer() {
 
 function safeStartRecognizer() {
   if (!webspeech || recognizerActive || muted || speaking || !running) return;
-  try { webspeech.start(); recognizerActive = true; }
+  try { webspeech.start(); recognizerActive = true; LOG('recognizer started'); }
   catch (_) { /* InvalidStateError if already started */ }
 }
 
 function safeStopRecognizer() {
+  // Use stop() not abort() so any in-flight final results still deliver.
   if (!webspeech || !recognizerActive) return;
-  try { webspeech.abort(); } catch (_) {}
+  try { webspeech.stop(); } catch (_) {}
   recognizerActive = false;
+  LOG('recognizer stopped');
 }
 
-// Echo gating: pause/resume around Friday's own speech.
+// Echo gating around Friday's own TTS.
 window.addEventListener('friday:speaking', (e) => {
-  speaking = !!e.detail;
+  const next = !!e.detail;
+  if (next === speaking) return; // ignore duplicate events
+  speaking = next;
   if (speaking) {
+    LOG('TTS speaking — pausing recognizer');
     safeStopRecognizer();
   } else if (running && !muted) {
+    LOG('TTS done — resuming recognizer in 350 ms');
     clearTimeout(resumeTimer);
-    resumeTimer = setTimeout(() => safeStartRecognizer(), 350); // tail bleed
+    resumeTimer = setTimeout(() => safeStartRecognizer(), 350);
   }
 });
 
 // ---------- transcript routing ----------
 function stripWake(text) {
-  // Remove the wake-word match and any leading polite prefix, return the rest.
   return text.replace(WAKE_RE, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function deliverCommand(text) {
+  if (!text) return;
+  LOG('command delivered:', text);
+  clearTimeout(commandTimeoutHandle);
+  commandTimeoutHandle = null;
+  if (pendingCommandResolver) {
+    const r = pendingCommandResolver;
+    pendingCommandResolver = null;
+    try { r(text); } catch {}
+  }
+  mode = 'listening';
+  emit('command', text);
+}
+
+function armCommandTimeout() {
+  clearTimeout(commandTimeoutHandle);
+  commandTimeoutHandle = setTimeout(() => {
+    if (mode !== 'capturing') return;
+    LOG('command capture timed out');
+    if (pendingCommandResolver) {
+      const r = pendingCommandResolver;
+      pendingCommandResolver = null;
+      try { r(null); } catch {}
+    }
+    mode = 'listening';
+    emit('status', 'listening');
+    emit('command-timeout');
+  }, COMMAND_TIMEOUT_MS);
 }
 
 function handleTranscript(rawText, isFinal) {
   const text = rawText.toLowerCase();
 
-  // Shutdown — works in any mode.
+  // Shutdown matches anywhere, anytime.
   if (text.includes(SHUTDOWN_PHRASE)) {
+    LOG('shutdown phrase detected');
     emit('shutdown');
     return;
   }
 
-  // If we're waiting for a command (Riva unavailable path), forward the
-  // next final result to the pending resolver.
-  if (mode === 'capturing' && pendingCommandResolver && isFinal) {
+  // While capturing, the next final wins. (Interims kept for UI feedback
+  // if needed in future; for now only finals deliver.)
+  if (mode === 'capturing') {
+    if (!isFinal) return;
     const rest = WAKE_RE.test(text) ? stripWake(text) : text.trim();
-    if (rest) {
-      const r = pendingCommandResolver;
-      pendingCommandResolver = null;
-      r(rest);
-      return;
+    if (rest && rest.length >= 2) {
+      deliverCommand(rest);
     }
+    return;
   }
 
+  // Wake detection — final results only to avoid the same-utterance race.
   if (mode !== 'listening') return;
-  if (!isFinal && !WAKE_RE.test(text)) return; // wait for wake or final
+  if (!isFinal) return;
 
-  if (WAKE_RE.test(text)) {
-    const rest = stripWake(text);
-    if (rest && rest.split(' ').length >= 1 && rest.length >= 2) {
-      // wake + command in one breath
-      emit('wake');
-      emit('command', rest);
-    } else {
-      // bare wake — start command capture
-      emit('wake');
-      mode = 'capturing';
-      captureCommand().then((cmd) => {
-        mode = 'listening';
-        if (cmd) emit('command', cmd);
-      });
-    }
+  if (!WAKE_RE.test(text)) return;
+
+  const rest = stripWake(text);
+  if (rest && rest.length >= 2) {
+    // Same-utterance wake + command.
+    LOG('wake + same-utterance command:', rest);
+    emit('wake');
+    emit('command', rest);
+    return;
   }
+
+  // Bare wake — switch to capturing state and arm the timeout.
+  LOG('bare wake — entering capture mode');
+  emit('wake');
+  mode = 'capturing';
+  armCommandTimeout();
 }
 
-// ---------- VAD-endpointed command capture ----------
+// ---------- VAD-endpointed MediaRecorder (Riva quality upgrade) ----------
 function pickMime() {
   const opts = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
   for (const o of opts) if (window.MediaRecorder?.isTypeSupported?.(o)) return o;
   return '';
 }
 
-const VAD_HEAD = 0.04;      // headroom above noise floor to count as speech
-const VAD_SILENCE_MS = 750; // how long of quiet before we end the utterance
-const VAD_MAX_MS = 8000;    // hard ceiling on a single command
-const VAD_INITIAL_WAIT = 2500; // how long to wait for speech to start
+const VAD_HEAD = 0.04;
+const VAD_SILENCE_MS = 750;
+const VAD_MAX_MS = 8000;
+const VAD_INITIAL_WAIT = 2500;
 
 async function captureViaMediaRecorder() {
   await getMic();
@@ -193,7 +243,6 @@ async function captureViaMediaRecorder() {
     let startWallclock = performance.now();
     let pollHandle = null;
     let initialFloor = bargeAmp || 0.02;
-    // Snapshot a fresh noise floor over 200 ms.
     const floorSamples = [];
     const floorStart = performance.now();
 
@@ -203,17 +252,19 @@ async function captureViaMediaRecorder() {
       resolve(blob);
     };
 
-    rec.start(100); // 100 ms timeslices
+    rec.start(100);
 
     pollHandle = setInterval(() => {
-      if (muted || !running) { try { rec.stop(); } catch {} return; }
+      if (muted || !running || mode !== 'capturing') {
+        try { rec.stop(); } catch {}
+        return;
+      }
       const now = performance.now();
       if (now - floorStart < 200) {
         floorSamples.push(bargeAmp);
         return;
       }
       if (floorSamples.length) {
-        // Use the median as the noise floor.
         floorSamples.sort((a, b) => a - b);
         initialFloor = Math.max(0.005, floorSamples[Math.floor(floorSamples.length / 2)]);
         floorSamples.length = 0;
@@ -230,42 +281,72 @@ async function captureViaMediaRecorder() {
   });
 }
 
-async function captureViaWebSpeech() {
-  return new Promise((resolve) => {
-    pendingCommandResolver = resolve;
-    setTimeout(() => {
-      if (pendingCommandResolver === resolve) {
-        pendingCommandResolver = null;
-        resolve(null);
-      }
-    }, 6500);
-  });
+async function tryRivaInParallel() {
+  // Race the MediaRecorder + Riva path against a deadline. Returns the
+  // transcript string on success, null on failure / timeout / empty.
+  const deadline = new Promise((resolve) => setTimeout(() => resolve(null), RIVA_DEADLINE_MS + VAD_MAX_MS));
+  const work = (async () => {
+    try {
+      const blob = await captureViaMediaRecorder();
+      if (!blob || blob.size < 1200) return null;
+      const r = await Promise.race([
+        api.stt(blob),
+        new Promise((resolve) => setTimeout(() => resolve({ fallback: true }), RIVA_DEADLINE_MS)),
+      ]);
+      if (!r || r.fallback) { LOG('riva stt fallback / unavailable'); return null; }
+      const text = (r.transcript || '').trim();
+      if (!text) return null;
+      LOG('riva stt success:', text);
+      return text;
+    } catch (e) {
+      LOG('riva stt error', e?.message || e);
+      return null;
+    }
+  })();
+  return Promise.race([work, deadline]);
 }
 
-// VAD-endpointed capture + Riva transcription. Public for barge.js.
+// ---------- public captureCommand (used by barge.js + internal wake flow) ----------
 export async function captureCommand() {
   if (!running) return null;
-  // Pause Web Speech so it does not race the MediaRecorder for the mic.
-  safeStopRecognizer();
-  try {
-    const blob = await captureViaMediaRecorder();
-    let transcript = '';
-    if (blob && blob.size > 1200) {
-      try {
-        const r = await api.stt(blob);
-        if (r && !r.fallback) transcript = (r.transcript || '').trim();
-      } catch (_) { /* fall through to webspeech */ }
-    }
-    if (!transcript) {
-      // Resume recognizer and wait for the next final utterance.
-      safeStartRecognizer();
-      transcript = (await captureViaWebSpeech()) || '';
-    }
-    return transcript || null;
-  } finally {
-    // Always make sure the recognizer is running again.
-    setTimeout(() => safeStartRecognizer(), 250);
+  // Make sure the recognizer is running so the next final delivers.
+  safeStartRecognizer();
+
+  // Set capture mode synchronously so any final result that arrives during
+  // this function's lifetime is routed correctly.
+  mode = 'capturing';
+
+  const webSpeechWait = new Promise((resolve) => {
+    pendingCommandResolver = resolve;
+  });
+  armCommandTimeout();
+
+  // Kick off Riva in parallel; treat null as "not yet".
+  const rivaPromise = tryRivaInParallel();
+
+  // First non-empty wins. We wrap both so the loser's empty result
+  // does not preempt the winner.
+  const winner = await new Promise((resolve) => {
+    let settled = false;
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
+      resolve(val);
+    };
+    webSpeechWait.then((t) => { if (t) finish(t); });
+    rivaPromise.then((t) => { if (t) finish(t); });
+    // If both come back null, fall through to the timeout below.
+    Promise.all([webSpeechWait, rivaPromise]).then(([w, r]) => finish(w || r || null));
+  });
+
+  // Clean up any unresolved resolver.
+  if (pendingCommandResolver) {
+    pendingCommandResolver = null;
   }
+  clearTimeout(commandTimeoutHandle);
+  commandTimeoutHandle = null;
+  if (mode === 'capturing') mode = 'listening';
+  return winner || null;
 }
 
 // ---------- lifecycle ----------
@@ -283,6 +364,7 @@ export async function start() {
     return;
   }
   safeStartRecognizer();
+  LOG('voice pipeline started');
 }
 
 export function stop() {
@@ -290,8 +372,10 @@ export function stop() {
   mode = 'idle';
   safeStopRecognizer();
   clearTimeout(resumeTimer);
+  clearTimeout(commandTimeoutHandle);
   if (pendingCommandResolver) { try { pendingCommandResolver(null); } catch {} pendingCommandResolver = null; }
   emit('status', 'offline');
+  LOG('voice pipeline stopped');
 }
 
 export function setMuted(v) {

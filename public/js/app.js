@@ -140,6 +140,7 @@ function tryLocalCommand(text) {
 
 function handleSpokenCommand(text) {
   if (!text) return;
+  addSys(`heard: "${text}"`);
   if (tryLocalCommand(text)) return;
   if (voice.isSpeaking()) voice.stopSpeaking();
   sendMessage(text);
@@ -148,9 +149,14 @@ function handleSpokenCommand(text) {
 window.addEventListener('friday:command', (e) => handleSpokenCommand(e.detail));
 window.addEventListener('friday:wake', () => {
   setStatus('listening', 'listening');
-  voice.stopSpeaking();
+  // Only stop TTS if Friday is actually speaking — avoids dispatching a
+  // spurious speaking=false event that schedules a recognizer-restart.
+  if (voice.isSpeaking()) voice.stopSpeaking();
   addSys('— wake — listening for command…');
   hud.setReadout?.('Wake acknowledged. Awaiting command.');
+});
+window.addEventListener('friday:command-timeout', () => {
+  addSys('(no command heard — back to standby)');
 });
 window.addEventListener('friday:shutdown', () => {
   addSys('— shutdown received —');
