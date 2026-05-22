@@ -226,6 +226,9 @@ function deliverCommand(text) {
   LOG('command delivered:', text);
   clearTimeout(commandTimeoutHandle);
   commandTimeoutHandle = null;
+  clearTimeout(captureInterimTimer);
+  captureInterimTimer = null;
+  captureInterimBuf = '';
   if (pendingCommandResolver) {
     const r = pendingCommandResolver;
     pendingCommandResolver = null;
@@ -239,7 +242,16 @@ function armCommandTimeout() {
   clearTimeout(commandTimeoutHandle);
   commandTimeoutHandle = setTimeout(() => {
     if (mode !== 'capturing') return;
-    LOG('command capture timed out');
+    LOG('command capture timed out — falling back to last interim if any');
+    // Last-ditch: deliver whatever stable interim we have instead of giving up.
+    if (captureInterimBuf && captureInterimBuf.length >= 2) {
+      const txt = captureInterimBuf;
+      captureInterimBuf = '';
+      clearTimeout(captureInterimTimer);
+      captureInterimTimer = null;
+      deliverCommand(txt);
+      return;
+    }
     if (pendingCommandResolver) {
       const r = pendingCommandResolver;
       pendingCommandResolver = null;
@@ -249,6 +261,21 @@ function armCommandTimeout() {
     emit('status', 'listening');
     emit('command-timeout');
   }, COMMAND_TIMEOUT_MS);
+}
+
+// Stable-interim buffer for capture mode: Web Speech does not always emit
+// a final result for the post-wake utterance (short commands + ambient
+// noise + Chrome quirks). If an interim transcript stops changing for
+// ~1.1 s we treat that as "user finished speaking" and deliver it as the
+// command, instead of waiting forever for a final that may never arrive.
+let captureInterimBuf = '';
+let captureInterimTimer = null;
+const INTERIM_STABLE_MS = 1100;
+
+function clearCaptureInterim() {
+  clearTimeout(captureInterimTimer);
+  captureInterimTimer = null;
+  captureInterimBuf = '';
 }
 
 function handleTranscript(rawText, isFinal) {
@@ -261,12 +288,32 @@ function handleTranscript(rawText, isFinal) {
     return;
   }
 
-  // While capturing, deliver on the next final result.
   if (mode === 'capturing') {
-    if (!isFinal) return;
     const rest = detectWake(text) ? stripWake(text) : text.trim();
+    if (isFinal) {
+      clearCaptureInterim();
+      if (rest && rest.length >= 2) {
+        deliverCommand(rest);
+      }
+      return;
+    }
+    // Interim — start/refresh a stability timer. If the same text persists
+    // for INTERIM_STABLE_MS, deliver it. Resets every time the interim
+    // changes, so we only fire when the user has clearly stopped speaking.
     if (rest && rest.length >= 2) {
-      deliverCommand(rest);
+      if (rest !== captureInterimBuf) {
+        captureInterimBuf = rest;
+        LOG('capture interim buffered:', JSON.stringify(rest));
+        clearTimeout(captureInterimTimer);
+        captureInterimTimer = setTimeout(() => {
+          if (mode !== 'capturing' || !captureInterimBuf) return;
+          LOG('delivering stable interim:', captureInterimBuf);
+          const txt = captureInterimBuf;
+          captureInterimBuf = '';
+          captureInterimTimer = null;
+          deliverCommand(txt);
+        }, INTERIM_STABLE_MS);
+      }
     }
     return;
   }
@@ -293,6 +340,7 @@ function handleTranscript(rawText, isFinal) {
   LOG('bare wake (isFinal=' + isFinal + ') — entering capture mode');
   emit('wake');
   mode = 'capturing';
+  clearCaptureInterim();
   armCommandTimeout();
   // Belt-and-braces: kick the recognizer in case onend fires between
   // utterances and the restart races with this handler.
