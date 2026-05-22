@@ -8,6 +8,7 @@ import * as camera from './camera.js';
 import * as mb from './miniBrowser.js';
 import * as vr from './vr.js';
 import * as codegen from './codegen.js';
+import * as attachments from './attachments.js';
 
 // ---------- DOM ----------
 const $ = (id) => document.getElementById(id);
@@ -23,6 +24,11 @@ const btnVR = $('btn-vr');
 const btnCodegen = $('btn-codegen');
 const btnHistory = $('btn-history');
 const codegenPanel = $('codegen-panel');
+const fileInput = $('file-input');
+const attachBtn = $('attach-btn');
+const attChips = $('chat-attachments');
+const chatPanel = $('chat-panel');
+const dropOverlay = $('chat-drop-overlay');
 const historyPanel = $('history-panel');
 const chatHistoryList = $('chat-history');
 const creationHistoryList = $('creation-history');
@@ -54,12 +60,18 @@ function addSys(text) { return addBubble('sys', text); }
 
 let inflightBubble = null;
 async function sendMessage(message) {
-  if (!message || !message.trim()) return;
-  addBubble('user', message);
+  // Even with no text, allow sending if attachments are present (rare).
+  const atts = takePendingAttachments();
+  if (!message || !message.trim()) {
+    if (!atts.length) return;
+    message = '';
+  }
+  const summary = atts.length ? ` [attached: ${atts.map(a => a.name).join(', ')}]` : '';
+  addBubble('user', (message || '(attached files)') + summary);
   inflightBubble = addBubble('friday', '');
   let buf = '';
   try {
-    for await (const delta of api.chatStream(message)) {
+    for await (const delta of api.chatStream(message, atts.map(a => a.payload))) {
       buf += delta;
       if (inflightBubble) {
         // strip emotion tag from visible text
@@ -102,9 +114,124 @@ function prettifyChatError(raw) {
 chatForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const v = chatInput.value.trim();
-  if (!v) return;
+  if (!v && !pendingAttachments.length) return;
   chatInput.value = '';
   sendMessage(v);
+});
+
+// ---------- File attachments ----------
+const pendingAttachments = []; // [{ id, file, payload, status: 'busy'|'ready'|'error', error? }]
+let attachIdSeq = 1;
+
+function takePendingAttachments() {
+  // Return ready entries and clear the pending list (chips cleared too).
+  const ready = pendingAttachments.filter(a => a.status === 'ready' && a.payload);
+  pendingAttachments.length = 0;
+  renderChips();
+  return ready;
+}
+
+function removeAttachment(id) {
+  const i = pendingAttachments.findIndex(a => a.id === id);
+  if (i !== -1) { pendingAttachments.splice(i, 1); renderChips(); }
+}
+
+function renderChips() {
+  if (!pendingAttachments.length) {
+    attChips.hidden = true; attChips.innerHTML = '';
+    return;
+  }
+  attChips.hidden = false;
+  attChips.innerHTML = '';
+  for (const a of pendingAttachments) {
+    const chip = document.createElement('span');
+    chip.className = 'att-chip' + (a.status === 'error' ? ' att-error' : a.status === 'busy' ? ' att-busy' : '');
+    const meta = a.payload ? attachments.fmtSize(a.payload.size || 0) : '…';
+    const icon = a.payload ? attachments.iconFor(a.payload) : '⏳';
+    chip.innerHTML = `<span>${icon}</span><span class="att-name">${escapeHtml(a.file.name)}</span><span class="att-meta">${meta}</span>`;
+    if (a.status === 'error') {
+      const err = document.createElement('span');
+      err.className = 'att-meta'; err.textContent = ' · ' + (a.error || 'error');
+      chip.appendChild(err);
+    }
+    const x = document.createElement('button');
+    x.type = 'button'; x.className = 'att-x'; x.textContent = '×';
+    x.title = 'remove'; x.addEventListener('click', () => removeAttachment(a.id));
+    chip.appendChild(x);
+    attChips.appendChild(chip);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[<>&"']/g, c => ({ '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+async function attachFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  // Add busy chips immediately
+  const entries = files.map(file => ({
+    id: attachIdSeq++, file, payload: null, status: 'busy',
+  }));
+  pendingAttachments.push(...entries);
+  renderChips();
+  // Process each in parallel
+  await Promise.all(entries.map(async (entry) => {
+    try {
+      const payload = await attachments.processFile(entry.file);
+      entry.payload = payload;
+      if (payload.error) { entry.status = 'error'; entry.error = payload.error; }
+      else entry.status = 'ready';
+    } catch (e) {
+      entry.status = 'error'; entry.error = e?.message || 'processing failed';
+    }
+    renderChips();
+  }));
+  // Enforce total-payload cap once everything's processed
+  const capped = attachments.enforceTotalCap(pendingAttachments.filter(a => a.payload).map(a => a.payload));
+  for (let i = 0; i < pendingAttachments.length; i++) {
+    const a = pendingAttachments[i];
+    if (!a.payload) continue;
+    const c = capped[i];
+    if (c?.error && !a.error) { a.status = 'error'; a.error = c.error; }
+  }
+  renderChips();
+}
+
+attachBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  attachFiles(fileInput.files);
+  fileInput.value = '';
+});
+
+// Drag-and-drop on chat panel
+let dragDepth = 0;
+chatPanel.addEventListener('dragenter', (e) => {
+  if (!e.dataTransfer?.types?.includes('Files')) return;
+  e.preventDefault();
+  dragDepth++;
+  chatPanel.classList.add('dragging');
+  dropOverlay.hidden = false;
+});
+chatPanel.addEventListener('dragover', (e) => {
+  if (!e.dataTransfer?.types?.includes('Files')) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+});
+chatPanel.addEventListener('dragleave', (e) => {
+  if (--dragDepth <= 0) {
+    dragDepth = 0;
+    chatPanel.classList.remove('dragging');
+    dropOverlay.hidden = true;
+  }
+});
+chatPanel.addEventListener('drop', (e) => {
+  if (!e.dataTransfer?.types?.includes('Files')) return;
+  e.preventDefault();
+  dragDepth = 0;
+  chatPanel.classList.remove('dragging');
+  dropOverlay.hidden = true;
+  attachFiles(e.dataTransfer.files);
 });
 
 // ---------- Voice command routing ----------

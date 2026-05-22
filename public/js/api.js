@@ -8,12 +8,13 @@ export async function logout() {
   await fetch('/api/logout', { method: 'POST', credentials: 'include' });
 }
 
-export async function* chatStream(message) {
+export async function* chatStream(message, attachments) {
+  const body = (attachments && attachments.length) ? { message, attachments } : { message };
   const r = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) {
     const txt = await r.text().catch(() => '');

@@ -41,10 +41,14 @@
   <!-- Chat panel -->
   <section id="chat-panel">
     <div id="chat-log" aria-live="polite"></div>
+    <div id="chat-attachments" hidden></div>
     <form id="chat-form">
+      <input id="file-input" type="file" multiple hidden />
+      <button type="button" id="attach-btn" class="btn ghost" title="attach files" aria-label="attach files">📎</button>
       <input id="chat-input" type="text" autocomplete="off" placeholder="type to Friday…" />
       <button type="submit" class="btn primary">send</button>
     </form>
+    <div id="chat-drop-overlay" hidden>drop files to attach</div>
   </section>
 
   <!-- Codegen panel -->
