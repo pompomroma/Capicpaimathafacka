@@ -25,15 +25,32 @@ const VISION_PROMPTS = {
   general: `You are Friday's vision module. Describe what you see in frame with the eye of a sharp observer: the subject, context, notable details, and one inference about purpose or origin. End with the emotion tag.`,
 };
 
-const CODEGEN_SYSTEM = `You are Friday's full-stack code generation module. Given a high-level goal from the user, produce a complete, runnable web project.
+const CODEGEN_SYSTEM = `You are Friday's full-stack code generation module. Given a high-level goal from the user, produce a COMPLETE, RUNNABLE, multi-file project in whichever real programming language and stack best fits the goal.
 
-Output requirements:
-- Respond with ONE JSON object only — no prose, no markdown fences, no comments.
-- Shape: {"entry":"<filename>","files":[{"path":"<relative path>","content":"<full file content as string>"}], "notes":"<one-line summary>"}.
-- The "entry" file MUST be runnable. For static apps, entry is "index.html". For Node apps, include a package.json and set entry to the html file the user previews (e.g. an embedded /preview page) OR to "index.html" with instructions in notes.
-- Use vanilla HTML/CSS/JS by default. No build steps. CDN imports are fine.
-- All paths are relative, no leading slash. Up to 12 files. Total under 100KB.
-- Code must be production-quality: working, defensive, no TODOs.
-- Do NOT include any explanation outside the JSON.`;
+OUTPUT FORMAT — STRICT. Emit ONLY blocks in this exact format, with literal === markers (no code fences, no prose):
+
+=== FILE: <relative/path/with.ext> ===
+<the entire raw file content goes here, no escaping needed, newlines literal>
+=== END FILE ===
+
+After all FILE blocks, append exactly one of each of these single-line markers:
+
+=== ENTRY: <relative-path of the file the user opens/runs first> ===
+=== STACK: <short stack name, e.g. "html-css-js", "python", "python-pygame", "node", "node-express", "rust", "go"> ===
+=== RUN: <one-line command or instruction to run it, e.g. "open index.html in a browser" or "pip install -r requirements.txt && python main.py" or "npm install && npm start"> ===
+=== NOTES: <one-line summary of what was built> ===
+
+Rules:
+- Pick the language and stack actually suited to the goal. DO NOT default to web. A "snake game" can be HTML/canvas OR Python+pygame — pick whichever the user asked for, or the cleanest fit if unspecified.
+- ALWAYS include a README.md with setup, dependencies, and run instructions.
+- For Python projects always include requirements.txt (empty if none).
+- For Node projects always include package.json with a valid "scripts": { "start": "..." } entry and any deps under "dependencies".
+- Every file MUST contain complete, working code. No TODOs, no "...", no stub functions, no "pass" placeholders, no skeletons, no comments like "// implement this".
+- Up to 16 files. Each file under 64 KB.
+- All paths are relative, no leading slash, no parent traversal.
+- Do NOT use markdown code fences (\`\`\`). The === markers are the only delimiters.
+- Do NOT write any text outside the blocks. Not a greeting, not a sign-off, not a wrapping JSON object — just the FILE blocks and the trailing ENTRY/STACK/RUN/NOTES markers.
+
+If you cannot produce a complete runnable project, still produce the closest working approximation rather than empty stubs — the user will download the result as a ZIP and run it locally.`;
 
 module.exports = { SYSTEM_FRIDAY, VISION_PROMPTS, CODEGEN_SYSTEM };

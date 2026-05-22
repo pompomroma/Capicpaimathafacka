@@ -54,14 +54,29 @@ form.addEventListener('submit', async (e) => {
   const goal = goalEl.value.trim();
   if (!goal) return;
   runBtn.disabled = true;
-  setStatus('Generating…');
+  setStatus('Generating… complex projects may take 30–60 s.');
   try {
     const res = await api.codegen(goal);
     current = { ...res, goal };
-    setStatus(`Built ${res.files.length} files. Entry: ${res.entry}.${res.notes ? ' — ' + res.notes : ''}`);
+    const parts = [`Built ${res.files.length} files`];
+    if (res.stack) parts.push(`in ${res.stack}`);
+    parts.push(`. Entry: ${res.entry}.`);
+    if (res.run) parts.push(` Run: ${res.run}.`);
+    if (res.notes) parts.push(` — ${res.notes}`);
+    setStatus(parts.join(''));
     renderFileList();
   } catch (err) {
-    setStatus('Error: ' + err.message);
+    // api.js throws `Error(json.error)` from /api/codegen — and the
+    // server now includes a `raw` model-output snippet on 502 errors
+    // so the user can see what was actually emitted.
+    let msg = err?.message || String(err);
+    // Friendlier hints for the common failure modes.
+    if (/NIM_KEY_CODEGEN not set/i.test(msg)) {
+      msg = 'NVIDIA NIM codegen key not configured. Add NIM_KEY_CODEGEN to your Replit Secrets (or .env) and click Run again.';
+    } else if (/no parseable files/i.test(msg)) {
+      msg = 'Model did not return parseable file blocks. Try a more specific goal (e.g. "build me a snake game in vanilla HTML"). ' + msg;
+    }
+    setStatus('Error: ' + msg);
   } finally {
     runBtn.disabled = false;
   }
