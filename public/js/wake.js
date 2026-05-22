@@ -111,10 +111,34 @@ function makeRecognizer() {
   return r;
 }
 
+let startRetries = 0;
+let watchdogHandle = null;
+
 function safeStartRecognizer() {
-  if (!webspeech || recognizerActive || muted || speaking || !running) return;
-  try { webspeech.start(); recognizerActive = true; LOG('recognizer started'); }
-  catch (_) { /* InvalidStateError if already started */ }
+  if (!webspeech || recognizerActive || muted || speaking || !running) {
+    startRetries = 0;
+    return;
+  }
+  try {
+    webspeech.start();
+    recognizerActive = true;
+    startRetries = 0;
+    LOG('recognizer started');
+  } catch (e) {
+    // InvalidStateError can fire during the brief transitional state right
+    // after onend; retry with backoff. After several misses, rebuild the
+    // recognizer instance — Chrome occasionally leaves it permanently stuck.
+    LOG('recognizer start failed:', e?.message || e);
+    if (++startRetries < 5) {
+      setTimeout(safeStartRecognizer, 250 * startRetries);
+    } else {
+      LOG('recognizer start gave up; rebuilding instance');
+      startRetries = 0;
+      try { webspeech?.abort?.(); } catch (_) {}
+      webspeech = makeRecognizer();
+      setTimeout(safeStartRecognizer, 500);
+    }
+  }
 }
 
 function safeStopRecognizer() {
@@ -123,6 +147,28 @@ function safeStopRecognizer() {
   try { webspeech.stop(); } catch (_) {}
   recognizerActive = false;
   LOG('recognizer stopped');
+}
+
+// Watchdog: every 1.5 s, if we should be listening but the recognizer is
+// not running, restart it. Catches the case where onend's scheduled restart
+// silently failed (e.g. start() threw InvalidStateError and the retry chain
+// gave up, or the speaking flag got temporarily stuck and then cleared).
+function startWatchdog() {
+  if (watchdogHandle) return;
+  watchdogHandle = setInterval(() => {
+    if (!running || muted || speaking) return;
+    if (!recognizerActive) {
+      LOG('watchdog: recognizer should be active — restarting');
+      safeStartRecognizer();
+    }
+  }, 1500);
+}
+
+function stopWatchdog() {
+  if (watchdogHandle) {
+    clearInterval(watchdogHandle);
+    watchdogHandle = null;
+  }
 }
 
 // Echo gating around Friday's own TTS.
@@ -216,6 +262,9 @@ function handleTranscript(rawText, isFinal) {
   emit('wake');
   mode = 'capturing';
   armCommandTimeout();
+  // Belt-and-braces: kick the recognizer in case onend fires between
+  // utterances and the restart races with this handler.
+  setTimeout(safeStartRecognizer, 50);
 }
 
 // ---------- VAD-endpointed MediaRecorder (Riva quality upgrade) ----------
@@ -364,6 +413,7 @@ export async function start() {
     return;
   }
   safeStartRecognizer();
+  startWatchdog();
   LOG('voice pipeline started');
 }
 
@@ -371,11 +421,26 @@ export function stop() {
   running = false;
   mode = 'idle';
   safeStopRecognizer();
+  stopWatchdog();
   clearTimeout(resumeTimer);
   clearTimeout(commandTimeoutHandle);
   if (pendingCommandResolver) { try { pendingCommandResolver(null); } catch {} pendingCommandResolver = null; }
   emit('status', 'offline');
   LOG('voice pipeline stopped');
+}
+
+// Emergency reset hatch — call from DevTools (`window.fridayResetVoice()`)
+// to forcibly rebuild the recognizer if Web Speech ever gets wedged.
+if (typeof window !== 'undefined') {
+  window.fridayResetVoice = () => {
+    LOG('manual voice reset requested');
+    speaking = false;
+    try { webspeech?.abort?.(); } catch (_) {}
+    recognizerActive = false;
+    webspeech = makeRecognizer();
+    if (running) safeStartRecognizer();
+    return { running, muted, speaking, mode, recognizerActive };
+  };
 }
 
 export function setMuted(v) {
