@@ -68,10 +68,35 @@ async function sendMessage(message) {
       }
     }
   } catch (e) {
-    if (inflightBubble) inflightBubble.textContent = '(error: ' + e.message + ')';
+    const pretty = prettifyChatError(e?.message || String(e));
+    if (inflightBubble) inflightBubble.remove();
+    inflightBubble = null;
+    addSys('⚠ ' + pretty);
+    return;
+  }
+  if (!buf.trim() && inflightBubble) {
+    // Empty stream means the upstream completed without producing any
+    // content (rare but happens with some model errors). Surface it.
+    inflightBubble.remove();
+    inflightBubble = null;
+    addSys('⚠ no reply from the language model — check the server logs.');
     return;
   }
   if (buf.trim()) await voice.speak(buf);
+}
+
+function prettifyChatError(raw) {
+  if (/NIM_KEY_REASONING not set/i.test(raw)) {
+    return 'NVIDIA NIM key not configured. Add NIM_KEY_REASONING to your Replit Secrets (or .env) and click Run again.';
+  }
+  if (/upstream 401/.test(raw)) return 'NVIDIA NIM rejected the key (401). Verify NIM_KEY_REASONING at build.nvidia.com — it may be rotated, expired, or have no model access.';
+  if (/upstream 403/.test(raw)) return 'NVIDIA NIM forbidden (403). The key lacks access to the chat model.';
+  if (/upstream 404/.test(raw)) return 'NVIDIA NIM model not found (404). Check LLM_MODEL — default is meta/llama-3.3-70b-instruct.';
+  if (/upstream 429/.test(raw)) return 'NVIDIA NIM rate-limited (429). Wait a moment and try again.';
+  if (/upstream 5\d\d/.test(raw)) return 'NVIDIA NIM upstream error. Try again in a moment.';
+  if (/Failed to fetch|NetworkError/i.test(raw)) return 'Network error talking to the server. Is the Replit still running?';
+  // Strip the noisy "chat 503: " prefix so the inner error is readable.
+  return raw.replace(/^chat \d+:\s*/, '').replace(/^\{"?error"?:\s*"?/i, '').replace(/"?\}?$/, '');
 }
 
 chatForm.addEventListener('submit', (e) => {

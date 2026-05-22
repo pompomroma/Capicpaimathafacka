@@ -33,10 +33,14 @@ export async function* chatStream(message) {
       if (!t.startsWith('data:')) continue;
       const payload = t.slice(5).trim();
       if (!payload) continue;
-      try {
-        const j = JSON.parse(payload);
-        if (j.delta) yield j.delta;
-      } catch { /* event lines etc */ }
+      let j;
+      try { j = JSON.parse(payload); } catch { continue; }
+      // Surface server-emitted error events (sent as `data: {"error":"..."}`
+      // after the SSE stream already started, e.g. when NVIDIA NIM rejects
+      // the upstream request with 401/404/429/5xx). Without this, the
+      // client silently swallowed those and the reply bubble stayed blank.
+      if (j.error) throw new Error(j.error);
+      if (j.delta) yield j.delta;
     }
   }
 }
