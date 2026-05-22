@@ -70,6 +70,7 @@ async function sendMessage(message) {
   addBubble('user', (message || '(attached files)') + summary);
   inflightBubble = addBubble('friday', '');
   let buf = '';
+  let spokenIdx = 0; // how many chars of `buf` have already been queued for TTS
   try {
     for await (const delta of api.chatStream(message, atts.map(a => a.payload))) {
       buf += delta;
@@ -77,6 +78,24 @@ async function sendMessage(message) {
         // strip emotion tag from visible text
         inflightBubble.textContent = buf.replace(/\[\[emotion:[a-z]+\]\]/i, '').trim();
         chatLog.scrollTop = chatLog.scrollHeight;
+      }
+      // Stream-speak: speak completed sentences as they arrive so Friday
+      // talks while the rest of the reply is still being written.
+      // Avoid feeding any text that contains an unclosed "[[" (a partial
+      // [[emotion:x]] tag mid-arrival) — wait until it closes.
+      let safeEnd = buf.length;
+      const half = buf.indexOf('[[', spokenIdx);
+      if (half !== -1 && buf.indexOf(']]', half) === -1) safeEnd = half;
+      const window = buf.slice(spokenIdx, safeEnd);
+      // Find the LAST sentence boundary in the safe window.
+      const bRe = /[.!?…]["')\]]?(?=\s|$)/g;
+      let lastBoundary = -1;
+      let m;
+      while ((m = bRe.exec(window)) !== null) lastBoundary = m.index + m[0].length;
+      if (lastBoundary > 0) {
+        const chunk = window.slice(0, lastBoundary).trim();
+        if (chunk) voice.speakChunk(chunk);
+        spokenIdx += lastBoundary;
       }
     }
   } catch (e) {
@@ -94,7 +113,11 @@ async function sendMessage(message) {
     addSys('⚠ no reply from the language model — check the server logs.');
     return;
   }
-  if (buf.trim()) await voice.speak(buf);
+  // Stream ended — speak whatever remains past the last sentence boundary
+  // we already queued (e.g. a trailing clause with no terminating period,
+  // or text that was deferred while a partial [[emotion:...]] tag arrived).
+  const tail = buf.slice(spokenIdx).trim();
+  if (tail) voice.speakChunk(tail);
 }
 
 function prettifyChatError(raw) {

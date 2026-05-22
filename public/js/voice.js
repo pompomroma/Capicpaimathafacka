@@ -198,12 +198,22 @@ function speakFallback(text) {
   });
 }
 
-// ---------- public speak ----------
-export async function speak(rawText) {
-  if (!rawText) return;
-  dispatchEmotion(rawText);
-  const clean = normalizeForSpeech(rawText);
-  if (!clean) return;
+// ---------- public speak (streaming-friendly queue) ----------
+//
+// speakChunk(text) appends to a FIFO queue and starts a single drain
+// loop that plays each chunk through Riva (or Web Speech fallback) in
+// order. This lets the chat reply start being spoken as soon as the
+// first sentence streams in, instead of waiting for the full reply.
+//
+// speak(text) keeps the original "speak this whole thing and resolve
+// when done" semantics by enqueuing then awaiting the drain.
+
+const speakQueue = [];
+let drainPromise = null;
+
+async function speakOnce(clean) {
+  // The actual single-utterance play path. `clean` is already passed
+  // through normalizeForSpeech by the caller (speakChunk).
   ensureCtx();
   if (useFallback) return speakFallback(clean);
   try {
@@ -224,14 +234,51 @@ export async function speak(rawText) {
   }
 }
 
+function startDraining() {
+  if (drainPromise) return drainPromise;
+  drainPromise = (async () => {
+    try {
+      while (speakQueue.length) {
+        const next = speakQueue.shift();
+        try { await speakOnce(next); } catch (_) {}
+      }
+    } finally {
+      drainPromise = null;
+    }
+  })();
+  return drainPromise;
+}
+
+// Append a chunk (sentence, partial reply, etc.) to the speech queue.
+// Safe to call repeatedly as deltas arrive from a streaming chat reply.
+export function speakChunk(rawText) {
+  if (!rawText) return;
+  dispatchEmotion(rawText);
+  const clean = normalizeForSpeech(rawText);
+  if (!clean) return;
+  speakQueue.push(clean);
+  startDraining();
+}
+
+// Original "speak whole thing" API — equivalent to speakChunk + await
+// queue drain. Kept so existing call sites (camera analyze, shutdown
+// acknowledgement, etc.) work without changes.
+export async function speak(rawText) {
+  speakChunk(rawText);
+  if (drainPromise) await drainPromise;
+}
+
 export function stopSpeaking() {
+  // Drop any pending chunks so a barge-in doesn't get followed by the
+  // tail of the previous reply.
+  speakQueue.length = 0;
   try { audioEl.pause(); audioEl.currentTime = 0; } catch {}
   try { window.speechSynthesis?.cancel?.(); } catch {}
   window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false }));
 }
 
 export function isSpeaking() {
-  return (audioEl && !audioEl.paused) || !!(window.speechSynthesis && window.speechSynthesis.speaking);
+  return (audioEl && !audioEl.paused) || !!(window.speechSynthesis && window.speechSynthesis.speaking) || speakQueue.length > 0;
 }
 
 export function setFallback(v) { useFallback = !!v; }
