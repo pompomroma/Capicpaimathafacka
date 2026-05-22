@@ -3,14 +3,15 @@
   "version": "1.0.0",
   "private": true,
   "description": "Jarvis-style voice+vision AI assistant powered by NVIDIA NIM",
-  "main": "server.js",
+  "main": "index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "replit": "npm install --no-fund --no-audit --silent && node server.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

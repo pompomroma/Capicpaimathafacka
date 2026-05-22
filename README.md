@@ -71,6 +71,27 @@ After creating those files (or if Replit kept the originals from this
 repo), open the Secrets tab and add the four env vars listed above.
 Click Run.
 
+### If the Run button does nothing
+
+Most often this means Replit started before `npm install` finished, or
+its auto-detect couldn't pick a launch command. Try in order:
+
+1. Open the **Shell** tab and run:
+   ```
+   npm install
+   node server.js
+   ```
+   If the server prints `Friday online at http://localhost:3000`, the
+   Run button should also work on the next click — the issue was just
+   missing `node_modules`.
+2. If that works but the Run button still doesn't, recreate `.replit`
+   per the snippet above. The repo's `.replit` has a `run = "npm
+   install … && node server.js"` line so subsequent runs always
+   verify deps before launching.
+3. Both `index.js` (at the repo root) and `package.json`'s `main`
+   point at the same entry, so any of `node .`, `node index.js`,
+   `node server.js`, or `npm start` will boot the app.
+
 ## Architecture
 
 ```

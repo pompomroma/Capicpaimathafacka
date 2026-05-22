@@ -1,12 +1,12 @@
-run = "npm start"
-entrypoint = "server.js"
+run = "npm install --no-fund --no-audit --silent && node server.js"
+entrypoint = "index.js"
 modules = ["nodejs-20"]
 
 [nix]
 channel = "stable-23_11"
 
 [deployment]
-run = ["sh", "-c", "npm start"]
+run = ["sh", "-c", "node server.js"]
 deploymentTarget = "cloudrun"
 
 [[ports]]
