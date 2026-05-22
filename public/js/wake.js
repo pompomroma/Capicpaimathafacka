@@ -21,7 +21,40 @@ import * as api from './api.js';
 const LOG = (...a) => { try { console.log('[friday]', ...a); } catch {} };
 
 // ---- wake matching ----
-const WAKE_RE = /(^|\W)(hey\s+|okay\s+|ok\s+)?(friday|fri[\s-]?day|fry[\s-]?day|free\s+day|frieda|fridey|frydae|fryde|fride|priday|pry\s+day)(\W|$)/i;
+// Permissive list of common ASR mistranscriptions of "Friday". Using \b
+// boundaries lets these match wherever the wake word appears in the
+// utterance (start, middle, after punctuation, etc.) without the
+// previous regex's strict (^|\W)...(\W|$) wrappers that failed on
+// trailing 's, possessives, or word-merged transcriptions.
+const WAKE_PATTERNS = [
+  /\bfriday'?s?\b/i,
+  /\bfri[\s\-]day'?s?\b/i,
+  /\bfry[\s\-]?day'?s?\b/i,
+  /\bfree[\s\-]?day'?s?\b/i,
+  /\bfr[ie][ei]da\b/i,
+  /\bfridey\b/i,
+  /\bfride\b/i,
+  /\bfrydae\b/i,
+  /\bfryde\b/i,
+  /\bpriday\b/i,
+  /\bpry\s+day\b/i,
+  /\bfreeway\b/i,    // sometimes Chrome hears "Friday" as "freeway"
+  /\bfryday\b/i,
+];
+function detectWake(text) {
+  for (const rx of WAKE_PATTERNS) if (rx.test(text)) return true;
+  return false;
+}
+function stripWake(text) {
+  let s = text;
+  for (const rx of WAKE_PATTERNS) {
+    s = s.replace(new RegExp(rx.source, rx.flags + (rx.flags.includes('g') ? '' : 'g')), ' ');
+  }
+  // also strip an optional leading polite prefix (hey/okay/ok/yo) plus any
+  // surrounding punctuation/whitespace
+  s = s.replace(/^(?:\s*(?:hey|okay|ok|yo)\W*)+/i, ' ');
+  return s.replace(/\s+/g, ' ').trim();
+}
 const SHUTDOWN_PHRASE = 'disconnect all systems';
 
 // ---- timing ----
@@ -87,6 +120,7 @@ function makeRecognizer() {
       const res = ev.results[i];
       const txt = (res[0]?.transcript || '').trim();
       if (!txt) continue;
+      LOG('heard', res.isFinal ? 'FINAL' : 'interim', JSON.stringify(txt), 'mode=', mode);
       handleTranscript(txt, !!res.isFinal);
     }
   };
@@ -187,10 +221,6 @@ window.addEventListener('friday:speaking', (e) => {
 });
 
 // ---------- transcript routing ----------
-function stripWake(text) {
-  return text.replace(WAKE_RE, ' ').replace(/\s+/g, ' ').trim();
-}
-
 function deliverCommand(text) {
   if (!text) return;
   LOG('command delivered:', text);
@@ -231,26 +261,28 @@ function handleTranscript(rawText, isFinal) {
     return;
   }
 
-  // While capturing, the next final wins. (Interims kept for UI feedback
-  // if needed in future; for now only finals deliver.)
+  // While capturing, deliver on the next final result.
   if (mode === 'capturing') {
     if (!isFinal) return;
-    const rest = WAKE_RE.test(text) ? stripWake(text) : text.trim();
+    const rest = detectWake(text) ? stripWake(text) : text.trim();
     if (rest && rest.length >= 2) {
       deliverCommand(rest);
     }
     return;
   }
 
-  // Wake detection — final results only to avoid the same-utterance race.
   if (mode !== 'listening') return;
-  if (!isFinal) return;
 
-  if (!WAKE_RE.test(text)) return;
+  // Wake detection — fire on interim too for snappy UX. The mode flip to
+  // 'capturing' guards against double-fires from a subsequent final of
+  // the same utterance.
+  if (!detectWake(text)) return;
 
   const rest = stripWake(text);
   if (rest && rest.length >= 2) {
-    // Same-utterance wake + command.
+    // Same-utterance wake + command. Wait for final to avoid emitting a
+    // half-formed command from a partial interim.
+    if (!isFinal) return;
     LOG('wake + same-utterance command:', rest);
     emit('wake');
     emit('command', rest);
@@ -258,7 +290,7 @@ function handleTranscript(rawText, isFinal) {
   }
 
   // Bare wake — switch to capturing state and arm the timeout.
-  LOG('bare wake — entering capture mode');
+  LOG('bare wake (isFinal=' + isFinal + ') — entering capture mode');
   emit('wake');
   mode = 'capturing';
   armCommandTimeout();
