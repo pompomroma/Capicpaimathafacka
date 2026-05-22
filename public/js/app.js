@@ -262,7 +262,14 @@ function tryLocalCommand(text) {
   const t = text.toLowerCase().trim();
   if (!t) return false;
 
-  // Camera mode
+  // ---- Stop speaking / interrupt ----
+  if (/^(stop|cancel|silence|quiet|shut\s+up|stop\s+(talking|speaking|the voice))$/.test(t)) {
+    voice.stopSpeaking();
+    addSys('— voice silenced —');
+    return true;
+  }
+
+  // ---- Camera mode ----
   if (/(camera|vision|visual)\s*mode/.test(t) || /enter (camera|vision)/.test(t)) {
     camera.enter().then((ok) => { if (ok) { btnCamera.classList.add('active'); btnVR.hidden = false; } });
     return true;
@@ -272,15 +279,15 @@ function tryLocalCommand(text) {
     return true;
   }
 
-  // VR mode
-  if (/vr\s*mode|cardboard/.test(t)) {
+  // ---- VR mode ----
+  if (/\b(vr|cardboard)\s*mode\b/.test(t)) {
     const on = vr.toggle();
     addSys(on ? 'VR mode engaged.' : 'VR mode disengaged.');
     return true;
   }
-  if (/exit vr/.test(t)) { vr.setVR(false); return true; }
+  if (/^exit vr$/.test(t) || /^(close|disable) vr$/.test(t)) { vr.setVR(false); addSys('VR off.'); return true; }
 
-  // Mini-browser open / close
+  // ---- Mini-browser (must be before generic "open X" patterns) ----
   const openMatch = t.match(/\bopen\s+(google|duckduckgo|ddg|bing|youtube|wikipedia|wiki)(?:\s+(?:for|about)?\s*(.+))?$/);
   if (openMatch) {
     const engine = openMatch[1];
@@ -291,7 +298,7 @@ function tryLocalCommand(text) {
   }
   if (/close (web|browser)/.test(t)) { mb.close(); return true; }
 
-  // Vision commands
+  // ---- Vision analysis commands ----
   const visionMatch = t.match(/\b(?:analyze|analyse|scan)\b\s+(?:this\s+|the\s+)?(product|medication|med|movement|material|math|mathematics)/);
   if (visionMatch) {
     let cmd = visionMatch[1];
@@ -306,11 +313,146 @@ function tryLocalCommand(text) {
     return true;
   }
 
-  // Mute
-  if (/^mute(\s+mic)?$/.test(t)) { setMute(true); return true; }
-  if (/^unmute/.test(t)) { setMute(false); return true; }
+  // ---- Mute / unmute ----
+  if (/^mute(\s+mic(rophone)?)?$/.test(t) || /\bmute (the )?microphone\b/.test(t)) { setMute(true); return true; }
+  if (/^unmute/.test(t) || /\bunmute (the )?microphone\b/.test(t)) { setMute(false); return true; }
+
+  // ---- Codegen panel ----
+  if (/^(open|show)\s+(?:the\s+)?(builder|codegen|code\s+generation|build(?:er)?(?:\s+panel)?)$/.test(t)) {
+    if (codegenPanel.hidden) { codegenPanel.hidden = false; btnCodegen.classList.add('active'); }
+    addSys('Build panel open.');
+    return true;
+  }
+  if (/^(close|hide)\s+(?:the\s+)?(builder|codegen|code\s+generation|build(?:er)?(?:\s+panel)?)$/.test(t)) {
+    codegenPanel.hidden = true; btnCodegen.classList.remove('active');
+    addSys('Build panel closed.');
+    return true;
+  }
+
+  // ---- Codegen: build / create / generate ----
+  // Explicit codegen verbs ("build", "develop", "program", "code") always
+  // trigger codegen. "make", "create", "generate" only trigger when the
+  // goal mentions an app-like keyword.
+  const buildMatch = t.match(/^(?:please\s+)?(build|code|develop|program|generate|make|create)(?:\s+me)?(?:\s+(?:a|an|the))?\s+(.+)$/i);
+  if (buildMatch) {
+    const verb = buildMatch[1].toLowerCase();
+    const goal = buildMatch[2].trim();
+    const explicit = /^(build|code|develop|program)$/.test(verb);
+    const appLike = /\b(app|application|website|web\s?site|game|tool|program|script|page|dashboard|widget|api|bot|extension|plugin|calculator|tracker|clone|simulator|generator|visualizer|playground|portal|library|frontend|backend|interface|landing|chrome)\b/i.test(goal);
+    if (explicit || appLike) {
+      runCodegen(goal);
+      return true;
+    }
+    // else: fall through to regular chat
+  }
+
+  // ---- Codegen preview / download ----
+  if (/^preview$/.test(t) || /^(show|preview)( the)? (code|result|build|program|app)$/.test(t)) {
+    const btn = $('codegen-preview');
+    if (btn) { btn.click(); addSys('Showing preview.'); }
+    else addSys('Nothing to preview — build something first.');
+    return true;
+  }
+  if (/^download$/.test(t) || /^download( the)? (zip|code|build|program|app|file|project)$/.test(t) || /^export( the)? (code|build|program|project)?$/.test(t)) {
+    const btn = $('codegen-download');
+    if (btn) { btn.click(); addSys('Download starting.'); }
+    else addSys('Nothing to download — build something first.');
+    return true;
+  }
+
+  // ---- History panel ----
+  if (/^(open|show)\s+(?:the\s+)?(history|past\s+chats?|conversations?|creations?|memory|logs?)$/.test(t)) {
+    if (historyPanel.hidden) {
+      historyPanel.hidden = false; btnHistory.classList.add('active');
+      loadHistory();
+    }
+    addSys('History open.');
+    return true;
+  }
+  if (/^(close|hide)\s+(?:the\s+)?(history|past\s+chats?|memory|logs?)$/.test(t)) {
+    historyPanel.hidden = true; btnHistory.classList.remove('active');
+    return true;
+  }
+  if (/^(switch|go)\s+(?:to\s+)?(?:the\s+)?(creations?|builds?)$/.test(t)) {
+    document.querySelector('.tab[data-tab="creation-history"]')?.click();
+    return true;
+  }
+  if (/^(switch|go)\s+(?:to\s+)?(?:the\s+)?(chats?|messages?|conversations?)$/.test(t)) {
+    document.querySelector('.tab[data-tab="chat-history"]')?.click();
+    return true;
+  }
+
+  // ---- Close everything ----
+  if (/^(close|hide)\s+(all|every)?\s*(panels?|windows?)$/.test(t)) {
+    codegenPanel.hidden = true; btnCodegen.classList.remove('active');
+    historyPanel.hidden = true; btnHistory.classList.remove('active');
+    mb.close();
+    addSys('Panels closed.');
+    return true;
+  }
+
+  // ---- Clear chat (visual only — history on the server is preserved) ----
+  if (/^(clear|wipe|delete)\s+(?:the\s+)?(chat|conversation|messages|log|screen|bubbles?)$/.test(t)) {
+    chatLog.innerHTML = '';
+    addSys('Chat cleared.');
+    return true;
+  }
+
+  // ---- Reset / restart voice pipeline ----
+  if (/^(reset|restart|reboot)\s+(?:the\s+)?(voice|listener|recognizer|mic(?:rophone)?|systems?|yourself)$/.test(t)) {
+    if (typeof window.fridayResetVoice === 'function') {
+      window.fridayResetVoice();
+      addSys('Voice pipeline reset.');
+    } else {
+      addSys('Reset helper unavailable.');
+    }
+    return true;
+  }
+
+  // ---- Logout ----
+  if (/^(log\s*out|sign\s*out|sign\s*me\s*off|log\s*me\s*out|disconnect\s+account)$/.test(t)) {
+    voice.speak('Logging out. See you soon, sir.');
+    setTimeout(async () => {
+      try { await api.logout(); } catch {}
+      location.href = '/login';
+    }, 1200);
+    return true;
+  }
+
+  // ---- Help / list commands ----
+  if (/^(help|what\s+(can|do)\s+you\s+do|list\s+(commands|features|capabilities)|what\s+are\s+(your|the)\s+commands)$/.test(t)) {
+    const help = [
+      'Voice commands at your service.',
+      'Camera mode, vision mode, exit camera, V.R. mode.',
+      'Mute, unmute.',
+      'Open google, duckduckgo, bing, youtube, or wikipedia. Close web to dismiss.',
+      'Analyze product, medication, movement, material, or math.',
+      'Build me an app, build me a game, code a website, generate a tool. Then say preview or download.',
+      'Open builder, close builder. Open history, close history. Switch to creations, switch to chats.',
+      'Stop talking to interrupt me. Clear chat to wipe the log. Reset voice if I stop hearing you.',
+      'Log out to end your session, disconnect all systems to shut me down.',
+    ].join(' ');
+    addBubble('friday', help);
+    voice.speak(help);
+    return true;
+  }
 
   return false;
+}
+
+// Programmatic codegen submit, used by the "build me X" voice path.
+function runCodegen(goal) {
+  if (codegenPanel.hidden) {
+    codegenPanel.hidden = false;
+    btnCodegen.classList.add('active');
+  }
+  const goalEl = $('codegen-goal');
+  if (goalEl) goalEl.value = goal;
+  addSys('Building: ' + goal);
+  voice.speak('Working on it, sir.');
+  const form = $('codegen-form');
+  if (form?.requestSubmit) form.requestSubmit();
+  else form?.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
 }
 
 function handleSpokenCommand(text) {
