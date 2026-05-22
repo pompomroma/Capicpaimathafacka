@@ -1,53 +1,132 @@
+// Pure-JS JSON file store.
+//
+// Replaces better-sqlite3 so the project has zero native dependencies and
+// installs cleanly on any Node 20+ runtime — including a blank Replit Node
+// template where .replit/replit.nix may have been stripped at import time.
+//
+// Exposes the same `q` API surface that the rest of the server uses
+// (createUser.run, userByEmail.get, addMessage.run, recentMessages.all,
+// addCreation.run, recentCreations.all, creationById.get) so callers in
+// server/auth.js, server/chat.js and server/codegen.js need no changes.
+
 const path = require('path');
 const fs = require('fs');
-const Database = require('better-sqlite3');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
-const DB_PATH = path.join(DATA_DIR, 'friday.db');
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
+const DB_PATH = path.join(DATA_DIR, 'friday.json');
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE NOT NULL,
-    pw_hash TEXT NOT NULL,
-    created_at INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS conversations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    ts INTEGER NOT NULL,
-    FOREIGN KEY(user_id) REFERENCES users(id)
-  );
-  CREATE INDEX IF NOT EXISTS idx_conv_user_ts ON conversations(user_id, ts);
-  CREATE TABLE IF NOT EXISTS creations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    goal TEXT NOT NULL,
-    files_json TEXT NOT NULL,
-    ts INTEGER NOT NULL,
-    FOREIGN KEY(user_id) REFERENCES users(id)
-  );
-  CREATE INDEX IF NOT EXISTS idx_creations_user_ts ON creations(user_id, ts);
-`);
+const EMPTY = () => ({
+  users: [],
+  conversations: [],
+  creations: [],
+  nextId: { user: 1, message: 1, creation: 1 },
+});
 
-function initDb() { /* schema already ensured at require time */ }
+let state;
+try {
+  if (fs.existsSync(DB_PATH)) {
+    const raw = fs.readFileSync(DB_PATH, 'utf8');
+    state = raw.trim() ? JSON.parse(raw) : EMPTY();
+    // Defensive: ensure all shapes exist
+    state.users        ||= [];
+    state.conversations||= [];
+    state.creations    ||= [];
+    state.nextId       ||= { user: 1, message: 1, creation: 1 };
+  } else {
+    state = EMPTY();
+  }
+} catch (e) {
+  console.warn('[db] failed to read', DB_PATH, '—', e.message, '(starting fresh)');
+  state = EMPTY();
+}
+
+let saveTimer = null;
+function save() {
+  // Debounce writes — coalesces bursts of mutations into one fsync.
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    const tmp = DB_PATH + '.tmp';
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(state));
+      fs.renameSync(tmp, DB_PATH);
+    } catch (e) {
+      console.error('[db] save failed:', e.message);
+    }
+  }, 60);
+}
+// Flush on exit so in-flight writes are not lost.
+function flush() {
+  if (saveTimer) clearTimeout(saveTimer);
+  try { fs.writeFileSync(DB_PATH, JSON.stringify(state)); } catch {}
+}
+process.on('exit', flush);
+process.on('SIGINT', () => { flush(); process.exit(); });
+process.on('SIGTERM', () => { flush(); process.exit(); });
 
 const q = {
-  createUser: db.prepare('INSERT INTO users (email, pw_hash, created_at) VALUES (?, ?, ?)'),
-  userByEmail: db.prepare('SELECT * FROM users WHERE email = ?'),
-  userById: db.prepare('SELECT id, email, created_at FROM users WHERE id = ?'),
+  createUser: {
+    run(email, pw_hash, created_at) {
+      const id = state.nextId.user++;
+      state.users.push({ id, email, pw_hash, created_at });
+      save();
+      return { lastInsertRowid: id };
+    },
+  },
+  userByEmail: {
+    get(email) { return state.users.find(u => u.email === email); },
+  },
+  userById: {
+    get(id) {
+      const u = state.users.find(uu => uu.id === id);
+      return u ? { id: u.id, email: u.email, created_at: u.created_at } : undefined;
+    },
+  },
 
-  addMessage: db.prepare('INSERT INTO conversations (user_id, role, content, ts) VALUES (?, ?, ?, ?)'),
-  recentMessages: db.prepare('SELECT role, content, ts FROM conversations WHERE user_id = ? ORDER BY ts DESC LIMIT ?'),
+  addMessage: {
+    run(user_id, role, content, ts) {
+      const id = state.nextId.message++;
+      state.conversations.push({ id, user_id, role, content, ts });
+      save();
+      return { lastInsertRowid: id };
+    },
+  },
+  recentMessages: {
+    all(user_id, limit) {
+      return state.conversations
+        .filter(m => m.user_id === user_id)
+        .sort((a, b) => b.ts - a.ts)
+        .slice(0, limit)
+        .map(m => ({ role: m.role, content: m.content, ts: m.ts }));
+    },
+  },
 
-  addCreation: db.prepare('INSERT INTO creations (user_id, goal, files_json, ts) VALUES (?, ?, ?, ?)'),
-  recentCreations: db.prepare('SELECT id, goal, files_json, ts FROM creations WHERE user_id = ? ORDER BY ts DESC LIMIT ?'),
-  creationById: db.prepare('SELECT id, goal, files_json, ts FROM creations WHERE id = ? AND user_id = ?'),
+  addCreation: {
+    run(user_id, goal, files_json, ts) {
+      const id = state.nextId.creation++;
+      state.creations.push({ id, user_id, goal, files_json, ts });
+      save();
+      return { lastInsertRowid: id };
+    },
+  },
+  recentCreations: {
+    all(user_id, limit) {
+      return state.creations
+        .filter(c => c.user_id === user_id)
+        .sort((a, b) => b.ts - a.ts)
+        .slice(0, limit)
+        .map(c => ({ id: c.id, goal: c.goal, files_json: c.files_json, ts: c.ts }));
+    },
+  },
+  creationById: {
+    get(id, user_id) {
+      const c = state.creations.find(cc => cc.id === id && cc.user_id === user_id);
+      return c ? { id: c.id, goal: c.goal, files_json: c.files_json, ts: c.ts } : undefined;
+    },
+  },
 };
 
-module.exports = { db, initDb, q };
+// No-op kept for API compatibility with the previous module shape.
+function initDb() {}
+
+module.exports = { initDb, q };

@@ -26,6 +26,51 @@ A Jarvis-style web AI assistant powered by NVIDIA NIM. Drops into a blank Replit
 2. On Replit: import this repo into a blank Node template, set the secrets above, hit **Run**.
 3. Locally: `npm install && npm start`, open http://localhost:3000.
 
+The project has **zero native dependencies** — everything is pure JS, so it
+installs and runs on any Node 20+ environment without compilers or build
+tools.
+
+## Running on Replit when `.replit` / `replit.nix` were stripped
+
+Replit's GitHub-import flow can strip hidden config files like `.replit`
+and `replit.nix` for security. The project is built to run without them
+— `package.json` has `main: "server.js"` and `scripts.start: "node
+server.js"`, which Replit auto-detects.
+
+If the Run button still does not work, recreate the two files manually
+in your Replit workspace (use the "Show hidden files" toggle in the
+file tree):
+
+**`.replit`** (at the repo root):
+
+```
+run = "npm start"
+entrypoint = "server.js"
+modules = ["nodejs-20"]
+
+[nix]
+channel = "stable-23_11"
+
+[[ports]]
+localPort = 3000
+externalPort = 80
+```
+
+**`replit.nix`** (at the repo root):
+
+```
+{ pkgs }: {
+  deps = [ pkgs.nodejs_20 ];
+}
+```
+
+That is the entire required config. There are no native deps, so no
+`python3`, `gcc`, or `make` need to be declared.
+
+After creating those files (or if Replit kept the originals from this
+repo), open the Secrets tab and add the four env vars listed above.
+Click Run.
+
 ## Architecture
 
 ```
