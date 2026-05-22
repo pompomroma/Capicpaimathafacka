@@ -7,7 +7,7 @@ const { CODEGEN_SYSTEM } = require('./prompts');
 const router = express.Router();
 
 const NIM_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
-const MODEL = process.env.CODEGEN_MODEL || 'qwen/qwen2.5-coder-32b-instruct';
+const MODEL = process.env.CODEGEN_MODEL || 'qwen/qwen3-coder-480b-a35b-instruct';
 
 function extractJson(s) {
   if (!s) return null;
