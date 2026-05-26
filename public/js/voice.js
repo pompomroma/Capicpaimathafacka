@@ -158,6 +158,23 @@ function speakSentenceWebSpeech(text) {
   return new Promise((resolve) => {
     if (!window.speechSynthesis) { resolve(); return; }
     if (!pickedVoice) refreshVoice();
+    let done = false;
+    // Chrome's speechSynthesis sometimes never fires onend (a long-standing
+    // engine bug). Without a guard the speak queue hangs forever, which keeps
+    // friday:speaking=true and leaves the wake recognizer permanently paused.
+    // Force-resolve after an estimated max duration (~100 ms/char + 2 s,
+    // capped at 30 s) and cancel the stuck utterance.
+    const estMs = Math.min(30000, 2000 + text.length * 100);
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      try { window.speechSynthesis.cancel(); } catch {}
+      finish();
+    }, estMs);
     try {
       const u = new SpeechSynthesisUtterance(text);
       u.lang = 'en-US';
@@ -165,10 +182,10 @@ function speakSentenceWebSpeech(text) {
       u.rate = 0.98;
       u.pitch = 1.0;
       u.volume = 1.0;
-      u.onend = () => resolve();
-      u.onerror = () => resolve();
+      u.onend = finish;
+      u.onerror = finish;
       window.speechSynthesis.speak(u);
-    } catch { resolve(); }
+    } catch { finish(); }
   });
 }
 
@@ -220,13 +237,24 @@ async function speakOnce(clean) {
     const res = await api.tts(clean);
     if (res?.fallback) { useFallback = true; return speakFallback(clean); }
     return await new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(safety);
+        window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false }));
+        resolve();
+      };
+      // Absolute safety cap so a stalled audio stream can never hang the
+      // queue and leave friday:speaking=true (which would pause the
+      // wake recognizer indefinitely).
+      const safety = setTimeout(finish, 60000);
       audioEl.src = res.url;
-      const done = () => { window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false })); resolve(); };
-      audioEl.onended = done;
-      audioEl.onerror = done;
+      audioEl.onended = finish;
+      audioEl.onerror = finish;
       audioEl.play()
         .then(() => window.dispatchEvent(new CustomEvent('friday:speaking', { detail: true })))
-        .catch(() => { useFallback = true; speakFallback(clean).then(resolve); });
+        .catch(() => { clearTimeout(safety); useFallback = true; speakFallback(clean).then(finish); });
     });
   } catch (e) {
     useFallback = true;

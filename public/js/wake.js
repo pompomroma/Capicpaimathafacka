@@ -147,6 +147,7 @@ function makeRecognizer() {
 
 let startRetries = 0;
 let watchdogHandle = null;
+let speakingSince = 0; // timestamp friday:speaking went true (for stuck-state recovery)
 
 function safeStartRecognizer() {
   if (!webspeech || recognizerActive || muted || speaking || !running) {
@@ -190,7 +191,17 @@ function safeStopRecognizer() {
 function startWatchdog() {
   if (watchdogHandle) return;
   watchdogHandle = setInterval(() => {
-    if (!running || muted || speaking) return;
+    if (!running) return;
+    // Recover from a stuck speaking state — e.g. a TTS utterance whose end
+    // event never fired (Chrome speechSynthesis bug) or a stalled audio
+    // stream. Left unhandled this pauses the recognizer forever, so wake
+    // stops responding. If speaking has been true longer than any plausible
+    // utterance, force it clear and let the recognizer restart below.
+    if (speaking && performance.now() - speakingSince > 18000) {
+      LOG('watchdog: speaking stuck >18s — forcing clear');
+      speaking = false;
+    }
+    if (muted || speaking) return;
     if (!recognizerActive) {
       LOG('watchdog: recognizer should be active — restarting');
       safeStartRecognizer();
@@ -211,6 +222,7 @@ window.addEventListener('friday:speaking', (e) => {
   if (next === speaking) return; // ignore duplicate events
   speaking = next;
   if (speaking) {
+    speakingSince = performance.now();
     LOG('TTS speaking — pausing recognizer');
     safeStopRecognizer();
   } else if (running && !muted) {
