@@ -483,6 +483,20 @@ window.addEventListener('friday:shutdown', () => {
   setStatus(null, 'offline');
 });
 window.addEventListener('friday:status', (e) => { setStatus(null, e.detail); });
+// Live "what the recognizer is hearing" — confirms the mic is actually
+// feeding Web Speech. If you speak and nothing shows here, the browser is
+// not giving the recognizer audio (mic permission, or running inside
+// Replit's embedded preview iframe — open the app in its own browser tab).
+let hearingClear = null;
+window.addEventListener('friday:hearing', (e) => {
+  const { text, final } = e.detail || {};
+  if (!text) return;
+  statusText.textContent = (final ? '“' : '… ') + text + (final ? '”' : '');
+  clearTimeout(hearingClear);
+  hearingClear = setTimeout(() => {
+    if (wake.isRunning()) setStatus('listening', wake.getMuted() ? 'muted' : 'listening');
+  }, 2500);
+});
 window.addEventListener('friday:speaking', (e) => {
   if (e.detail) setStatus('speaking', 'speaking');
   else if (wake.isRunning()) setStatus('listening', 'listening');

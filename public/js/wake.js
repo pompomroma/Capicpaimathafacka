@@ -121,6 +121,7 @@ function makeRecognizer() {
       const txt = (res[0]?.transcript || '').trim();
       if (!txt) continue;
       LOG('heard', res.isFinal ? 'FINAL' : 'interim', JSON.stringify(txt), 'mode=', mode);
+      emit('hearing', { text: txt, final: !!res.isFinal, mode });
       handleTranscript(txt, !!res.isFinal);
     }
   };
@@ -225,6 +226,9 @@ window.addEventListener('friday:speaking', (e) => {
     speakingSince = performance.now();
     LOG('TTS speaking — pausing recognizer');
     safeStopRecognizer();
+    // Acquire the barge-in analyser stream lazily, only now that Friday is
+    // speaking — never while the recognizer is the sole mic consumer.
+    getMic().catch(() => {});
   } else if (running && !muted) {
     LOG('TTS done — resuming recognizer in 350 ms');
     clearTimeout(resumeTimer);
@@ -493,8 +497,11 @@ export async function captureCommand() {
 // ---------- lifecycle ----------
 export async function start() {
   if (running) return;
-  try { await getMic(); }
-  catch (e) { emit('status', 'mic denied'); return; }
+  // NOTE: we deliberately do NOT open a getUserMedia stream here.
+  // webkitSpeechRecognition manages its own microphone capture; holding a
+  // second getUserMedia stream at the same time makes some browsers starve
+  // the recognizer of audio (so "Friday" is never heard). The barge-in
+  // analyser stream is acquired lazily only while Friday is speaking.
   running = true;
   mode = 'listening';
   emit('status', 'listening');
