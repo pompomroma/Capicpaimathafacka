@@ -270,22 +270,30 @@ function tryLocalCommand(text) {
   }
 
   // ---- Camera mode ----
+  // Off-pattern first so "exit camera mode" / "turn off vision" do not
+  // accidentally match the enter-pattern (which contains "camera mode").
+  if (/^(?:please\s+)?(?:turn(?:\s+off)?|shut(?:\s+off|\s+down)?|disable|deactivate|kill|terminate|stop|end|exit|close|leave)\s+(?:the\s+)?(?:camera|vision|visual)(?:\s+mode)?$/.test(t)) {
+    camera.exit(); btnCamera.classList.remove('active'); btnVR.hidden = true; vr.setVR(false);
+    addSys('Vision off.');
+    return true;
+  }
   if (/(camera|vision|visual)\s*mode/.test(t) || /enter (camera|vision)/.test(t)) {
     camera.enter().then((ok) => { if (ok) { btnCamera.classList.add('active'); btnVR.hidden = false; } });
     return true;
   }
-  if (/exit (camera|vision)/.test(t) || /close (camera|vision)/.test(t)) {
-    camera.exit(); btnCamera.classList.remove('active'); btnVR.hidden = true; vr.setVR(false);
-    return true;
-  }
 
   // ---- VR mode ----
+  // Off-pattern first; toggle-pattern second.
+  if (/^(?:please\s+)?(?:turn(?:\s+off)?|shut(?:\s+off|\s+down)?|disable|deactivate|kill|terminate|stop|end|exit|close|leave)\s+(?:the\s+)?(?:vr|v\.?r\.?|cardboard)(?:\s+mode)?$/.test(t)) {
+    vr.setVR(false);
+    addSys('VR off.');
+    return true;
+  }
   if (/\b(vr|cardboard)\s*mode\b/.test(t)) {
     const on = vr.toggle();
     addSys(on ? 'VR mode engaged.' : 'VR mode disengaged.');
     return true;
   }
-  if (/^exit vr$/.test(t) || /^(close|disable) vr$/.test(t)) { vr.setVR(false); addSys('VR off.'); return true; }
 
   // ---- Mini-browser (must be before generic "open X" patterns) ----
   const openMatch = t.match(/\bopen\s+(google|duckduckgo|ddg|bing|youtube|wikipedia|wiki)(?:\s+(?:for|about)?\s*(.+))?$/);
@@ -296,7 +304,11 @@ function tryLocalCommand(text) {
     addSys(`Opening ${engine}${query ? ' for "' + query + '"' : ''}.`);
     return true;
   }
-  if (/close (web|browser)/.test(t)) { mb.close(); return true; }
+  if (/^(?:please\s+)?(?:turn(?:\s+off)?|shut(?:\s+off|\s+down)?|disable|deactivate|kill|stop|end|exit|close|hide|dismiss)\s+(?:the\s+)?(?:web|browser|mini[\s-]?browser|web\s+browser|search)$/.test(t)) {
+    mb.close();
+    addSys('Browser closed.');
+    return true;
+  }
 
   // ---- Vision analysis commands ----
   const visionMatch = t.match(/\b(?:analyze|analyse|scan)\b\s+(?:this\s+|the\s+)?(product|medication|med|movement|material|math|mathematics)/);
@@ -323,7 +335,7 @@ function tryLocalCommand(text) {
     addSys('Build panel open.');
     return true;
   }
-  if (/^(close|hide)\s+(?:the\s+)?(builder|codegen|code\s+generation|build(?:er)?(?:\s+panel)?)$/.test(t)) {
+  if (/^(?:please\s+)?(?:turn(?:\s+off)?|shut(?:\s+off|\s+down)?|disable|deactivate|kill|stop|end|exit|close|hide|dismiss)\s+(?:the\s+)?(?:builder|codegen|code\s+generation|build(?:er)?(?:\s+panel|\s+mode|\s+window)?)$/.test(t)) {
     codegenPanel.hidden = true; btnCodegen.classList.remove('active');
     addSys('Build panel closed.');
     return true;
@@ -369,8 +381,9 @@ function tryLocalCommand(text) {
     addSys('History open.');
     return true;
   }
-  if (/^(close|hide)\s+(?:the\s+)?(history|past\s+chats?|memory|logs?)$/.test(t)) {
+  if (/^(?:please\s+)?(?:turn(?:\s+off)?|shut(?:\s+off|\s+down)?|disable|deactivate|kill|stop|end|exit|close|hide|dismiss)\s+(?:the\s+)?(?:history|past\s+chats?|memory|logs?)(?:\s+panel|\s+window)?$/.test(t)) {
     historyPanel.hidden = true; btnHistory.classList.remove('active');
+    addSys('History closed.');
     return true;
   }
   if (/^(switch|go)\s+(?:to\s+)?(?:the\s+)?(creations?|builds?)$/.test(t)) {
@@ -382,12 +395,16 @@ function tryLocalCommand(text) {
     return true;
   }
 
-  // ---- Close everything ----
-  if (/^(close|hide)\s+(all|every)?\s*(panels?|windows?)$/.test(t)) {
-    codegenPanel.hidden = true; btnCodegen.classList.remove('active');
-    historyPanel.hidden = true; btnHistory.classList.remove('active');
-    mb.close();
-    addSys('Panels closed.');
+  // ---- Close / turn off everything ----
+  if (/^(?:please\s+)?(?:turn(?:\s+off)?|shut(?:\s+off|\s+down)?|disable|deactivate|kill|stop|end|exit|close|hide|leave|escape)\s+(?:all|every|everything|every\s+mode|all\s+modes?|all\s+panels?|every\s+panel|all\s+windows?|every\s+window)$/.test(t)
+      || /^(?:back\s+to\s+)?(?:standby|chat|home|main)$/.test(t)) {
+    let closed = [];
+    if (camera.isActive?.()) { camera.exit(); btnCamera.classList.remove('active'); btnVR.hidden = true; closed.push('vision'); }
+    if (vr.isOn?.()) { vr.setVR(false); closed.push('VR'); }
+    if (!codegenPanel.hidden) { codegenPanel.hidden = true; btnCodegen.classList.remove('active'); closed.push('build'); }
+    if (!historyPanel.hidden) { historyPanel.hidden = true; btnHistory.classList.remove('active'); closed.push('history'); }
+    if (mb.isOpen?.()) { mb.close(); closed.push('browser'); }
+    addSys(closed.length ? `Off: ${closed.join(', ')}.` : 'Nothing to close.');
     return true;
   }
 
