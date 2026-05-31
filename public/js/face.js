@@ -176,10 +176,12 @@ function sampleHead() {
     out[i * 3 + 2] = z;
     weights[i] = w;
     // Per-point size: feature points larger and brighter, skin points
-    // smaller so they don't bloom together under additive blending.
-    sizes[i] = feat > 0.35 ? 0.030
-             : feat > 0.10 ? 0.022
-             :               0.012;
+    // smaller so they don't bloom together under additive blending. Values
+    // are in the same world-unit scale that PointsMaterial uses, multiplied
+    // by uScale (renderer height) in the vertex shader.
+    sizes[i] = feat > 0.35 ? 0.040
+             : feat > 0.10 ? 0.028
+             :               0.020;
     i++;
   }
   while (i < POINT_COUNT) {
@@ -187,7 +189,7 @@ function sampleHead() {
     out[i * 3 + 1] = rand(-0.3, 0.3);
     out[i * 3 + 2] = rand(0, 0.3);
     weights[i] = classify(out[i*3], out[i*3+1], out[i*3+2]);
-    sizes[i] = 0.018;
+    sizes[i] = 0.024;
     i++;
   }
   return { positions: out, weights, sizes };
@@ -388,20 +390,26 @@ export function init(canvas) {
   // a sharp edge instead of the fuzzy square sprite default.
   //
   // NOTE: ShaderMaterial only auto-injects position/normal/uv. The `color`
-  // attribute MUST be declared explicitly in the vertex shader or the shader
-  // fails to compile and the head silently vanishes.
+  // attribute MUST be declared explicitly in the vertex shader. uScale
+  // mirrors PointsMaterial's internal `scale` (= renderer canvas height in
+  // pixels) so per-point sizes use the same world-unit scale as the rest of
+  // the scene — otherwise points end up sub-pixel and silently invisible.
   const headMat = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
+    uniforms: {
+      uScale: { value: Math.max(1, renderer.domElement.height || window.innerHeight) },
+    },
     vertexShader: `
+      uniform float uScale;
       attribute float size;
       attribute vec3 color;
       varying vec3 vColor;
       void main() {
         vColor = color;
         vec4 mv = modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = size * (320.0 / max(0.001, -mv.z));
+        gl_PointSize = size * (uScale / max(0.001, -mv.z));
         gl_Position = projectionMatrix * mv;
       }
     `,
@@ -413,7 +421,10 @@ export function init(canvas) {
         float d = dot(c, c);
         if (d > 0.25) discard;
         float a = smoothstep(0.25, 0.06, d);
-        gl_FragColor = vec4(vColor, a);
+        // Floor on color so additive blending always contributes something
+        // visible even if vColor was accidentally zero (defensive).
+        vec3 col = max(vColor, vec3(0.02));
+        gl_FragColor = vec4(col, a);
       }
     `,
   });
@@ -490,6 +501,12 @@ function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  // Keep the per-point size scale in sync with the new canvas height so
+  // point sprites don't shrink to sub-pixel when the viewport changes.
+  if (surfacePoints?.material?.uniforms?.uScale) {
+    surfacePoints.material.uniforms.uScale.value =
+      Math.max(1, renderer.domElement.height || window.innerHeight);
+  }
 }
 
 export function setEmotion(name) {
