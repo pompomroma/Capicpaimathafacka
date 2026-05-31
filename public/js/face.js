@@ -386,13 +386,17 @@ export function init(canvas) {
   // together. Feature points (larger size from sampleHead) now visibly stand
   // out from skin points (smaller), and the radial smoothstep + discard gives
   // a sharp edge instead of the fuzzy square sprite default.
+  //
+  // NOTE: ShaderMaterial only auto-injects position/normal/uv. The `color`
+  // attribute MUST be declared explicitly in the vertex shader or the shader
+  // fails to compile and the head silently vanishes.
   const headMat = new THREE.ShaderMaterial({
-    vertexColors: true,
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
     vertexShader: `
       attribute float size;
+      attribute vec3 color;
       varying vec3 vColor;
       void main() {
         vColor = color;
@@ -402,6 +406,7 @@ export function init(canvas) {
       }
     `,
     fragmentShader: `
+      precision mediump float;
       varying vec3 vColor;
       void main() {
         vec2 c = gl_PointCoord - vec2(0.5);
