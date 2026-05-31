@@ -27,8 +27,8 @@
 
 // ---------- tunables ----------
 const POINT_COUNT     = 5200;  // surface points forming the head
-const DISPERSAL_COUNT = 720;   // orange sparks drifting off the right side
-const HALO_COUNT      = 360;   // ambient floaters
+const DISPERSAL_COUNT = 480;   // orange sparks drifting off the right silhouette
+const HALO_COUNT      = 260;   // ambient floaters
 
 const EMOTIONS = ['neutral', 'focused', 'amused', 'concerned', 'alert'];
 
@@ -148,34 +148,49 @@ function classify(x, y, z) {
 // ---------- sample head surface ----------
 function sampleHead() {
   const out = new Float32Array(POINT_COUNT * 3);
+  const sizes = new Float32Array(POINT_COUNT);
   const weights = new Array(POINT_COUNT);
   let i = 0;
-  const eps = 0.04;
+  const eps = 0.022; // tighter shell so the silhouette + feature edges sharpen
   let attempts = 0;
-  while (i < POINT_COUNT && attempts < POINT_COUNT * 200) {
+  while (i < POINT_COUNT && attempts < POINT_COUNT * 400) {
     attempts++;
     const x = rand(-0.92, 0.92);
     const y = rand(-1.05, 1.20);
     const z = rand(-0.95, 1.00);
     const d = headSDF(x, y, z);
     if (Math.abs(d) > eps) continue;
-    // Bias to slightly higher density at the front (visible features)
+    // Bias to higher density at the front (visible features)
     if (z < 0 && Math.random() > 0.55) continue;
+
+    // Feature-weighted acceptance: more points where eyes/nose/mouth/brow
+    // live, so the same point budget concentrates on the features.
+    const w = classify(x, y, z);
+    const noseLike = Math.max(0, 1 - Math.hypot(x / 0.12, (y - 0.05) / 0.30, (z - 0.70) / 0.22));
+    const feat = Math.max(w.mouth, w.brow, w.lidL + w.lidR, w.upperLip, w.lowerLip, noseLike);
+    const accept = 0.35 + 0.65 * Math.min(1, feat);
+    if (Math.random() > accept) continue;
+
     out[i * 3]     = x;
     out[i * 3 + 1] = y;
     out[i * 3 + 2] = z;
-    weights[i] = classify(x, y, z);
+    weights[i] = w;
+    // Per-point size: feature points larger and brighter, skin points
+    // smaller so they don't bloom together under additive blending.
+    sizes[i] = feat > 0.35 ? 0.030
+             : feat > 0.10 ? 0.022
+             :               0.012;
     i++;
   }
-  // pad if undersampled
   while (i < POINT_COUNT) {
     out[i * 3]     = rand(-0.3, 0.3);
     out[i * 3 + 1] = rand(-0.3, 0.3);
     out[i * 3 + 2] = rand(0, 0.3);
     weights[i] = classify(out[i*3], out[i*3+1], out[i*3+2]);
+    sizes[i] = 0.018;
     i++;
   }
-  return { positions: out, weights };
+  return { positions: out, weights, sizes };
 }
 
 // ---------- emotion delta tables ----------
@@ -241,7 +256,7 @@ function buildEmotionDeltas(base, weights) {
 }
 
 // ---------- colors ----------
-function buildColors(base) {
+function buildColors(base, weights) {
   // x-position blend: cyan/white at x<0, orange/red at x>0, smooth across center.
   const colors = new Float32Array(POINT_COUNT * 3);
   for (let i = 0; i < POINT_COUNT; i++) {
@@ -253,20 +268,30 @@ function buildColors(base) {
     const leftIntensity = Math.min(1, 0.85 + 0.25 * Math.random());
     const cyan = [0.35 * leftIntensity, 0.92 * leftIntensity, 1.0 * leftIntensity];
     const orange = [1.0, 0.45, 0.12];
-    colors[i * 3]     = cyan[0] * (1 - tt) + orange[0] * tt;
-    colors[i * 3 + 1] = cyan[1] * (1 - tt) + orange[1] * tt;
-    colors[i * 3 + 2] = cyan[2] * (1 - tt) + orange[2] * tt;
+    let r = cyan[0] * (1 - tt) + orange[0] * tt;
+    let g = cyan[1] * (1 - tt) + orange[1] * tt;
+    let b = cyan[2] * (1 - tt) + orange[2] * tt;
+    // Feature-point intensity boost so lips/eyes/nose read clearly against
+    // the dimmer cheek/forehead glow.
+    const w = weights[i];
+    const feat = Math.max(w.mouth, w.brow, w.lidL + w.lidR, w.upperLip, w.lowerLip);
+    const boost = 1.0 + 0.18 * Math.min(1, feat);
+    colors[i * 3]     = Math.min(1, r * boost);
+    colors[i * 3 + 1] = Math.min(1, g * boost);
+    colors[i * 3 + 2] = Math.min(1, b * boost);
   }
   return colors;
 }
 
 // ---------- dispersal sparks ----------
 function buildDispersal(base) {
-  // Pick source indices weighted toward the right side of the head.
+  // Pick source indices near the RIGHT-SILHOUETTE edge, well clear of the
+  // central nose/eye/mouth region so orange streaks no longer cross the
+  // features.
   const srcCandidates = [];
   for (let i = 0; i < POINT_COUNT; i++) {
     const x = base[i * 3];
-    if (x > -0.05) srcCandidates.push({ i, w: Math.max(0.1, x + 0.55) });
+    if (x > 0.18) srcCandidates.push({ i, w: Math.max(0.1, (x - 0.18) + 0.4) });
   }
   // Weighted sample
   const srcs = new Int32Array(DISPERSAL_COUNT);
@@ -322,7 +347,7 @@ function buildHalo() {
       y = gauss() * 1.4;
       z = gauss() * 0.9;
       r2 = x * x + y * y + z * z;
-    } while (r2 < 1.4 || r2 > 6);
+    } while (r2 < 1.9 || r2 > 6.5);
     pos[i * 3] = x; pos[i * 3 + 1] = y; pos[i * 3 + 2] = z;
     vel[i * 3]     = (Math.random() - 0.5) * 0.04;
     vel[i * 3 + 1] = (Math.random() - 0.5) * 0.03;
@@ -348,20 +373,44 @@ export function init(canvas) {
   basePositions = sample.positions;
   pointWeights = sample.weights;
   emotionDeltas = buildEmotionDeltas(basePositions, pointWeights);
-  baseColors = buildColors(basePositions);
+  baseColors = buildColors(basePositions, pointWeights);
 
   const headGeom = new THREE.BufferGeometry();
   posAttr = new THREE.BufferAttribute(new Float32Array(basePositions), 3);
   headGeom.setAttribute('position', posAttr);
   headGeom.setAttribute('color', new THREE.BufferAttribute(baseColors, 3));
-  const headMat = new THREE.PointsMaterial({
-    size: 0.022,
+  headGeom.setAttribute('size', new THREE.BufferAttribute(sample.sizes, 1));
+
+  // Custom shader: per-point size attribute + crisp circular sprite. Replaces
+  // PointsMaterial whose uniform size + square sprites made features bloom
+  // together. Feature points (larger size from sampleHead) now visibly stand
+  // out from skin points (smaller), and the radial smoothstep + discard gives
+  // a sharp edge instead of the fuzzy square sprite default.
+  const headMat = new THREE.ShaderMaterial({
     vertexColors: true,
     transparent: true,
-    opacity: 0.92,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
-    sizeAttenuation: true,
+    vertexShader: `
+      attribute float size;
+      varying vec3 vColor;
+      void main() {
+        vColor = color;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = size * (320.0 / max(0.001, -mv.z));
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      void main() {
+        vec2 c = gl_PointCoord - vec2(0.5);
+        float d = dot(c, c);
+        if (d > 0.25) discard;
+        float a = smoothstep(0.25, 0.06, d);
+        gl_FragColor = vec4(vColor, a);
+      }
+    `,
   });
   surfacePoints = new THREE.Points(headGeom, headMat);
 
@@ -496,10 +545,16 @@ function animate() {
     // Blink: upper eyelid points drop
     const blY = -blinkAmt * 0.07 * (w.lidL + w.lidR);
 
-    // Hologram jitter (slight per-frame noise)
-    const jx = (Math.random() - 0.5) * 0.0035;
-    const jy = (Math.random() - 0.5) * 0.0035;
-    const jz = (Math.random() - 0.5) * 0.0035;
+    // Feature-aware hologram jitter: features stay crisp (lips, eyes, nose,
+    // brow); skin keeps a subtle holographic shimmer. Without this, the
+    // ±0.0035 uniform noise smeared the very edges that define the face.
+    const isFeature = w.mouth > 0.25 || w.brow > 0.25
+                   || w.lidL  > 0.15 || w.lidR > 0.15
+                   || w.upperLip > 0.20 || w.lowerLip > 0.20;
+    const jAmp = isFeature ? 0.0008 : 0.0022;
+    const jx = (Math.random() - 0.5) * jAmp;
+    const jy = (Math.random() - 0.5) * jAmp;
+    const jz = (Math.random() - 0.5) * jAmp;
 
     arr[i3]     = basePositions[i3]     + ex + jx;
     arr[i3 + 1] = basePositions[i3 + 1] + ey + vY + blY + jy;
