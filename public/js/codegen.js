@@ -54,9 +54,23 @@ form.addEventListener('submit', async (e) => {
   const goal = goalEl.value.trim();
   if (!goal) return;
   runBtn.disabled = true;
-  setStatus('Generating… complex projects may take 30–60 s.');
+  setStatus('Planning the full-stack architecture… this can take 1–3 min.');
   try {
-    const res = await api.codegen(goal);
+    const res = await api.codegen(goal, (p) => {
+      // Live build log from the server's SSE progress events.
+      if (p.phase === 'planning') {
+        setStatus('Planning the full-stack architecture…');
+      } else if (p.phase === 'architecture') {
+        const n = (p.files || []).length;
+        setStatus(`Architecture ready${p.stack ? ' (' + p.stack + ')' : ''}: ${n} files. Generating code…`);
+      } else if (p.phase === 'building') {
+        const done = (p.files || []).length;
+        setStatus(`Generating code… round ${p.round}, ${done} file${done === 1 ? '' : 's'} written.`);
+      } else if (p.phase === 'verifying') {
+        const miss = (p.missing || []).length;
+        setStatus(`Filling in ${miss} remaining file${miss === 1 ? '' : 's'}…`);
+      }
+    });
     current = { ...res, goal };
     const parts = [`Built ${res.files.length} files`];
     if (res.stack) parts.push(`in ${res.stack}`);

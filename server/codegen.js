@@ -2,47 +2,152 @@ const express = require('express');
 const fetch = require('node-fetch');
 const { q } = require('./db');
 const { requireAuth } = require('./middleware');
-const { CODEGEN_SYSTEM } = require('./prompts');
+const { CODEGEN_SYSTEM, CODEGEN_ARCHITECT } = require('./prompts');
 
 const router = express.Router();
 
-const NIM_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
+const NIM_URL = process.env.NIM_URL || 'https://integrate.api.nvidia.com/v1/chat/completions';
 const MODEL = process.env.CODEGEN_MODEL || 'qwen/qwen3-coder-480b-a35b-instruct';
 
-// ---------- Parsers ----------
+const PER_CALL_TOKENS = 16384;  // per request
+const MAX_CONT_ROUNDS = 6;      // continuation rounds for the build stage
+const MAX_RECOVERY_ROUNDS = 2;  // targeted missing-file rounds
+const MAX_FILES = 40;
+const MAX_FILE_BYTES = 64 * 1024;
 
-// New: delimited-block format produced by the updated CODEGEN_SYSTEM
-// prompt. Far more robust than JSON because file content does not need
-// any escaping — long source files with quotes, backslashes and
-// newlines just pass through verbatim.
-function parseBlocks(raw) {
-  if (!raw || typeof raw !== 'string') return null;
-  const text = raw.replace(/\r\n/g, '\n');
-  const fileRe = /=== FILE:\s*([^=\n]+?)\s*===\n([\s\S]*?)\n=== END FILE ===/g;
-  const files = [];
-  let m;
-  while ((m = fileRe.exec(text)) !== null) {
-    const path = m[1].trim().replace(/^\/+/, '').replace(/\.\.\//g, '');
-    const content = m[2];
-    if (path) files.push({ path, content });
-  }
-  if (!files.length) return null;
-  const pick = (label) => {
-    const re = new RegExp('=== ' + label + ':\\s*([^=\\n]+?)\\s*===');
-    const mm = text.match(re);
-    return mm ? mm[1].trim() : '';
-  };
+// ---------- low-level model call ----------
+async function callModelRaw(messages, maxTokens) {
+  const r = await fetch(NIM_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.NIM_KEY_CODEGEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      messages,
+      temperature: 0.2,
+      top_p: 0.9,
+      max_tokens: maxTokens,
+      stream: false,
+    }),
+  });
+  if (!r.ok) throw new Error(`upstream ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  const j = await r.json();
   return {
-    files,
-    entry: pick('ENTRY'),
-    stack: pick('STACK'),
-    run:   pick('RUN'),
-    notes: pick('NOTES'),
+    content: j.choices?.[0]?.message?.content || '',
+    finishReason: j.choices?.[0]?.finish_reason || 'stop',
   };
 }
 
-// Backward-compat: previous prompt asked for a JSON envelope. If a model
-// still returns that shape, accept it.
+// Generate, automatically continuing when the model truncates on length.
+// Concatenates the raw text across rounds so a project can exceed any single
+// token budget. onRound(round) is called after each completed round.
+async function generateWithContinuation(systemPrompt, userPrompt, onRound) {
+  let full = '';
+  let round = 0;
+  while (round < MAX_CONT_ROUNDS) {
+    round++;
+    const messages = [{ role: 'system', content: systemPrompt }];
+    if (full) {
+      // Resume: give the model what it has produced and ask it to continue.
+      messages.push({ role: 'user', content: userPrompt });
+      messages.push({ role: 'assistant', content: full });
+      messages.push({
+        role: 'user',
+        content: 'Continue exactly where you left off. Do not repeat any text you already emitted. Resume the current === FILE === block or start the next one, and finish all remaining files plus the trailing ENTRY/STACK/RUN/NOTES markers.',
+      });
+    } else {
+      messages.push({ role: 'user', content: userPrompt });
+    }
+    const { content, finishReason } = await callModelRaw(messages, PER_CALL_TOKENS);
+    full += content;
+    if (onRound) onRound(round);
+    if (finishReason !== 'length') break;
+  }
+  return full;
+}
+
+// ---------- parsers ----------
+function parseBlocks(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const text = raw.replace(/\r\n/g, '\n');
+  const files = [];
+
+  // Complete blocks.
+  const fileRe = /=== FILE:\s*([^=\n]+?)\s*===\n([\s\S]*?)\n=== END FILE ===/g;
+  let m;
+  let lastEnd = 0;
+  while ((m = fileRe.exec(text)) !== null) {
+    const path = cleanPath(m[1]);
+    if (path) files.push({ path, content: m[2] });
+    lastEnd = fileRe.lastIndex;
+  }
+
+  // Salvage a final unterminated block (model stopped right at the edge).
+  const tail = text.slice(lastEnd);
+  const openRe = /=== FILE:\s*([^=\n]+?)\s*===\n([\s\S]*)$/;
+  const om = tail.match(openRe);
+  if (om && !/=== END FILE ===/.test(om[2])) {
+    const path = cleanPath(om[1]);
+    // Trim any trailing partial marker line.
+    let content = om[2].replace(/\n?===[^\n]*$/, '');
+    if (path && content.trim()) files.push({ path, content });
+  }
+
+  if (!files.length) return null;
+
+  // Dedupe by path, keep the longest content (continuation may re-emit a header).
+  const byPath = new Map();
+  for (const f of files) {
+    const prev = byPath.get(f.path);
+    if (!prev || f.content.length > prev.content.length) byPath.set(f.path, f);
+  }
+
+  return {
+    files: [...byPath.values()],
+    entry: pick(text, 'ENTRY'),
+    stack: pick(text, 'STACK'),
+    run:   pick(text, 'RUN'),
+    notes: pick(text, 'NOTES'),
+  };
+}
+
+function pick(text, label) {
+  const re = new RegExp('=== ' + label + ':\\s*([^=\\n]+?)\\s*===');
+  const mm = text.match(re);
+  return mm ? mm[1].trim() : '';
+}
+
+function cleanPath(p) {
+  return String(p || '').trim().replace(/^\/+/, '').replace(/\.\.\//g, '').slice(0, 200);
+}
+
+// Parse the architect manifest.
+function parseManifest(raw) {
+  if (!raw) return null;
+  const text = raw.replace(/\r\n/g, '\n');
+  const filesBlock = text.match(/=== FILES ===\n([\s\S]*?)(?:\n=== END FILES ===|$)/);
+  const files = [];
+  if (filesBlock) {
+    for (const line of filesBlock[1].split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      // "path — purpose" or "path - purpose" or just "path"
+      const path = cleanPath(t.split(/\s+[—-]\s+/)[0].replace(/^[-*]\s*/, ''));
+      if (path && /\.[a-z0-9]+$/i.test(path)) files.push(path);
+    }
+  }
+  return {
+    stack: pick(text, 'STACK'),
+    run:   pick(text, 'RUN'),
+    entry: pick(text, 'ENTRY'),
+    notes: pick(text, 'NOTES'),
+    files,
+  };
+}
+
+// Backward-compat JSON envelope.
 function extractJson(s) {
   if (!s) return null;
   const fenced = s.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -53,50 +158,14 @@ function extractJson(s) {
   try { return JSON.parse(s.slice(start, end + 1)); } catch { return null; }
 }
 
-// ---------- Model call ----------
-
-async function callModel(goal, retryHint) {
-  const baseMsg = `Build the following.\n\nGoal: ${goal}`;
-  const userMsg = retryHint
-    ? `${baseMsg}\n\n${retryHint}`
-    : baseMsg;
-  const r = await fetch(NIM_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.NIM_KEY_CODEGEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      messages: [
-        { role: 'system', content: CODEGEN_SYSTEM },
-        { role: 'user', content: userMsg },
-      ],
-      temperature: 0.2,
-      top_p: 0.9,
-      max_tokens: 16384,
-      stream: false,
-    }),
-  });
-  if (!r.ok) throw new Error(`upstream ${r.status}: ${(await r.text()).slice(0, 300)}`);
-  const j = await r.json();
-  return j.choices?.[0]?.message?.content || '';
-}
-
-// ---------- Helpers ----------
-
 function pickEntry(files, explicit) {
   if (explicit && files.some(f => f.path === explicit)) return explicit;
   const preferences = [
-    /^index\.html$/i,
-    /^main\.py$/i,
-    /^index\.js$/i,
-    /^app\.py$/i,
-    /^main\.go$/i,
-    /^src\/main\.rs$/i,
-    /^src\/index\.js$/i,
-    /package\.json$/i,
-    /^Cargo\.toml$/i,
+    /^index\.html$/i, /^public\/index\.html$/i,
+    /^main\.py$/i, /^app\.py$/i, /^app\/main\.py$/i,
+    /^index\.js$/i, /^server\.js$/i, /^src\/index\.js$/i,
+    /^src\/App\.jsx?$/i, /^main\.go$/i, /^src\/main\.rs$/i,
+    /package\.json$/i, /^Cargo\.toml$/i,
   ];
   for (const re of preferences) {
     const hit = files.find(f => re.test(f.path));
@@ -105,57 +174,101 @@ function pickEntry(files, explicit) {
   return files[0].path;
 }
 
-// ---------- Route ----------
+function sanitize(files) {
+  return files
+    .filter(f => f && typeof f.path === 'string' && typeof f.content === 'string' && f.content.trim().length > 0)
+    .slice(0, MAX_FILES)
+    .map(f => ({ path: cleanPath(f.path), content: f.content.slice(0, MAX_FILE_BYTES) }));
+}
 
+// ---------- SSE route ----------
 router.post('/codegen', requireAuth, async (req, res) => {
-  if (!process.env.NIM_KEY_CODEGEN) return res.status(503).json({ error: 'NIM_KEY_CODEGEN not set' });
   const goal = (req.body?.goal || '').toString().trim();
-  if (!goal || goal.length < 4) return res.status(400).json({ error: 'goal required' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  const fail = (error, raw) => {
+    res.write(`event: error\ndata: ${JSON.stringify({ error, raw: (raw || '').slice(0, 600) })}\n\n`);
+    res.end();
+  };
+
+  if (!process.env.NIM_KEY_CODEGEN) return fail('NIM_KEY_CODEGEN not set');
+  if (!goal || goal.length < 4) return fail('goal required');
+
+  let aborted = false;
+  req.on('close', () => { aborted = true; });
 
   let raw = '';
   try {
-    raw = await callModel(goal);
+    // ---- Stage A: architect / manifest ----
+    send({ phase: 'planning' });
+    const manifestRaw = await callModelRaw(
+      [
+        { role: 'system', content: CODEGEN_ARCHITECT },
+        { role: 'user', content: `App goal: ${goal}` },
+      ],
+      8192,
+    ).then(r => r.content).catch(() => '');
+    const manifest = parseManifest(manifestRaw) || { files: [], stack: '', run: '', entry: '', notes: '' };
+    if (aborted) return;
+    send({ phase: 'architecture', stack: manifest.stack, run: manifest.run, files: manifest.files });
+
+    // ---- Stage B: build with continuation ----
+    const manifestText = manifest.files.length
+      ? `\n\nApproved manifest:\nSTACK: ${manifest.stack}\nRUN: ${manifest.run}\nENTRY: ${manifest.entry}\nFILES:\n${manifest.files.map(f => '- ' + f).join('\n')}\n\nEmit the complete content of every file above.`
+      : '';
+    const buildPrompt = `App goal: ${goal}${manifestText}`;
+    raw = await generateWithContinuation(CODEGEN_SYSTEM, buildPrompt, (round) => {
+      if (!aborted) {
+        const partial = parseBlocks(raw + '');
+        send({ phase: 'building', round, files: (partial?.files || []).map(f => f.path) });
+      }
+    });
+    if (aborted) return;
+
     let parsed = parseBlocks(raw) || extractJson(raw);
+    if (!parsed?.files?.length) return fail('model returned no parseable files', raw);
+    parsed.files = sanitize(parsed.files);
+    if (!parsed.files.length) return fail('model emitted only empty files', raw);
 
-    if (!parsed?.files?.length) {
-      // Retry with a stronger format reminder.
-      raw = await callModel(
-        goal,
-        'Your previous output had no parseable FILE blocks. Use the exact === FILE: <path> === / === END FILE === format from the system prompt. Do not use markdown code fences. Do not wrap the result in JSON. Output only the blocks plus the trailing ENTRY/STACK/RUN/NOTES markers.',
-      );
-      parsed = parseBlocks(raw) || extractJson(raw);
+    // ---- Stage C: completeness check + recovery ----
+    if (manifest.files.length) {
+      let have = new Set(parsed.files.map(f => f.path));
+      let missing = manifest.files.filter(p => !have.has(p));
+      let recovery = 0;
+      while (missing.length && recovery < MAX_RECOVERY_ROUNDS && !aborted) {
+        recovery++;
+        send({ phase: 'verifying', missing });
+        const recPrompt = `App goal: ${goal}\n\nEmit ONLY these missing files, each complete and runnable, in the === FILE: path === / === END FILE === format. Do not emit any other files.\n${missing.map(f => '- ' + f).join('\n')}`;
+        const recRaw = await generateWithContinuation(CODEGEN_SYSTEM, recPrompt).catch(() => '');
+        const recParsed = parseBlocks(recRaw);
+        if (recParsed?.files?.length) {
+          for (const f of sanitize(recParsed.files)) {
+            if (!have.has(f.path)) { parsed.files.push(f); have.add(f.path); }
+          }
+        }
+        const stillMissing = manifest.files.filter(p => !have.has(p));
+        if (stillMissing.length === missing.length) break; // no progress
+        missing = stillMissing;
+      }
     }
+    if (aborted) return;
 
-    if (!parsed?.files?.length) {
-      return res.status(502).json({
-        error: 'model returned no parseable files',
-        raw: raw.slice(0, 600),
-      });
-    }
+    // Fill metadata from manifest where the build omitted it.
+    parsed.stack = parsed.stack || manifest.stack;
+    parsed.run = parsed.run || manifest.run;
+    parsed.notes = parsed.notes || manifest.notes;
+    parsed.entry = pickEntry(parsed.files, parsed.entry || manifest.entry);
 
-    // Sanitize files
-    parsed.files = parsed.files
-      .filter(f => f && typeof f.path === 'string' && typeof f.content === 'string' && f.content.trim().length > 0)
-      .slice(0, 16)
-      .map(f => ({
-        path: f.path.replace(/^\/+/, '').replace(/\.\.\//g, '').slice(0, 200),
-        content: f.content.slice(0, 64 * 1024),
-      }));
-
-    if (!parsed.files.length) {
-      return res.status(502).json({
-        error: 'model emitted only empty files',
-        raw: raw.slice(0, 600),
-      });
-    }
-
-    parsed.entry = pickEntry(parsed.files, parsed.entry);
-
-    // Persist (used by history)
     q.addCreation.run(req.user.id, goal, JSON.stringify(parsed), Date.now());
-    res.json(parsed);
+    send({ phase: 'done', ...parsed });
+    res.write('event: done\ndata: {}\n\n');
+    res.end();
   } catch (e) {
-    res.status(500).json({ error: e.message, raw: raw.slice(0, 400) });
+    if (!aborted) fail(e.message, raw);
   }
 });
 

@@ -84,18 +84,41 @@ export async function vision(blob, command, note = '') {
   return r.json();
 }
 
-export async function codegen(goal) {
+export async function codegen(goal, onProgress) {
   const r = await fetch('/api/codegen', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
     body: JSON.stringify({ goal }),
   });
-  if (!r.ok) {
+  if (!r.ok || !r.body) {
     const j = await r.json().catch(() => ({}));
     throw new Error(j.error || `codegen ${r.status}`);
   }
-  return r.json();
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  let final = null;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t.startsWith('data:')) continue;
+      const payload = t.slice(5).trim();
+      if (!payload) continue;
+      let j;
+      try { j = JSON.parse(payload); } catch { continue; }
+      if (j.error) throw new Error(j.error);
+      if (j.phase === 'done') { final = j; }
+      else if (j.phase && onProgress) onProgress(j);
+    }
+  }
+  if (!final) throw new Error('code generation ended without a result');
+  return final;
 }
 
 export async function chatHistory() {

@@ -25,32 +25,62 @@ const VISION_PROMPTS = {
   general: `You are Friday's vision module. Describe what you see in frame with the eye of a sharp observer: the subject, context, notable details, and one inference about purpose or origin. End with the emotion tag.`,
 };
 
-const CODEGEN_SYSTEM = `You are Friday's full-stack code generation module. Given a high-level goal from the user, produce a COMPLETE, RUNNABLE, multi-file project in whichever real programming language and stack best fits the goal.
+// Stage A — the architect. Designs a complete full-stack file tree BEFORE
+// any code is written, so the build stage has a roadmap of every file the
+// finished application needs.
+const CODEGEN_ARCHITECT = `You are Friday's software architect. Given a high-level app goal, design a COMPLETE, REAL, production-grade project — never a single throwaway script.
+
+Think about the whole application the user actually wants and every file a working version needs: frontend, backend/server, data layer, configuration, dependency manifests, and documentation, as appropriate to the category.
+
+Category guidance (apply what fits):
+- Game: game loop, input handling, state, rendering, assets, scoring, win/lose, restart.
+- Platform / web app: backend routes + persistence (SQLite or a JSON store) + frontend pages + an API client, wired end to end, with auth if implied.
+- Marketing / landing site: multiple sections, responsive CSS, working forms, assets.
+- Tool / CLI / data app: argument handling, core logic, I/O, and a usage doc.
+
+OUTPUT FORMAT — emit ONLY these markers, nothing else (no prose, no code fences):
+
+=== STACK: <short stack name, e.g. "node-express", "python-flask", "html-css-js", "python-pygame", "react-vite"> ===
+=== RUN: <exact one-line command(s) to install and run, e.g. "npm install && npm start"> ===
+=== ENTRY: <relative path the user opens or runs first> ===
+=== NOTES: <one-line description of the app> ===
+=== FILES ===
+<one line per file, format: relative/path/with.ext — one-line purpose>
+...every file the complete app needs...
+=== END FILES ===
+
+Rules:
+- Design a real architecture: separate files for separate concerns. A full-stack app is typically 8–30 files, NOT one.
+- ALWAYS include a dependency manifest (package.json with real deps and a valid "scripts":{"start":...}, or requirements.txt), a README.md, a .gitignore, and a .env.example when secrets/config apply.
+- All paths relative, no leading slash, no parent traversal (..).
+- List every file you intend to ship. Do not write file contents here — only the manifest.`;
+
+// Stage B — the builder. Emits the full content of every file from the
+// approved manifest.
+const CODEGEN_SYSTEM = `You are Friday's full-stack code generation module. You are given an app goal and an approved project manifest (stack, run command, and the complete file list). Emit the COMPLETE, RUNNABLE content of EVERY file in the manifest.
 
 OUTPUT FORMAT — STRICT. Emit ONLY blocks in this exact format, with literal === markers (no code fences, no prose):
 
 === FILE: <relative/path/with.ext> ===
-<the entire raw file content goes here, no escaping needed, newlines literal>
+<the entire raw file content, no escaping needed, newlines literal>
 === END FILE ===
 
-After all FILE blocks, append exactly one of each of these single-line markers:
+After all FILE blocks, append exactly one of each:
 
 === ENTRY: <relative-path of the file the user opens/runs first> ===
-=== STACK: <short stack name, e.g. "html-css-js", "python", "python-pygame", "node", "node-express", "rust", "go"> ===
-=== RUN: <one-line command or instruction to run it, e.g. "open index.html in a browser" or "pip install -r requirements.txt && python main.py" or "npm install && npm start"> ===
-=== NOTES: <one-line summary of what was built> ===
+=== STACK: <short stack name> ===
+=== RUN: <exact one-line command(s) to install and run> ===
+=== NOTES: <one-line summary> ===
 
 Rules:
-- Pick the language and stack actually suited to the goal. DO NOT default to web. A "snake game" can be HTML/canvas OR Python+pygame — pick whichever the user asked for, or the cleanest fit if unspecified.
-- ALWAYS include a README.md with setup, dependencies, and run instructions.
-- For Python projects always include requirements.txt (empty if none).
-- For Node projects always include package.json with a valid "scripts": { "start": "..." } entry and any deps under "dependencies".
-- Every file MUST contain complete, working code. No TODOs, no "...", no stub functions, no "pass" placeholders, no skeletons, no comments like "// implement this".
-- Up to 16 files. Each file under 64 KB.
-- All paths are relative, no leading slash, no parent traversal.
+- Deliver a REAL, complete, full-stack application — not a fragment, not a single script, not pseudocode. Implement EVERY file in the manifest with full working code.
+- Every file MUST be complete and runnable: no TODOs, no "...", no stub functions, no "pass"/empty placeholders, no skeletons, no "// implement this" comments. If a function is declared, fully implement it.
+- Wire the pieces together: imports/requires resolve, routes are mounted, the frontend calls the backend, the data layer is actually used, and the RUN command actually starts the app.
+- ALWAYS include the dependency manifest (package.json with real deps + valid "scripts":{"start":...}, or requirements.txt), README.md with exact install+run steps, .gitignore, and .env.example when config/secrets apply.
+- Ship as many files as the project genuinely needs (typically 8–30 for full-stack). Each file under 64 KB.
+- All paths relative, no leading slash, no parent traversal.
 - Do NOT use markdown code fences (\`\`\`). The === markers are the only delimiters.
-- Do NOT write any text outside the blocks. Not a greeting, not a sign-off, not a wrapping JSON object — just the FILE blocks and the trailing ENTRY/STACK/RUN/NOTES markers.
+- Do NOT write any text outside the blocks — no greeting, no sign-off, no JSON wrapper. Just FILE blocks and the trailing markers.
+- If your output is about to be cut off, keep going file by file; you may be asked to continue, in which case resume exactly where you left off without repeating earlier content.`;
 
-If you cannot produce a complete runnable project, still produce the closest working approximation rather than empty stubs — the user will download the result as a ZIP and run it locally.`;
-
-module.exports = { SYSTEM_FRIDAY, VISION_PROMPTS, CODEGEN_SYSTEM };
+module.exports = { SYSTEM_FRIDAY, VISION_PROMPTS, CODEGEN_SYSTEM, CODEGEN_ARCHITECT };
