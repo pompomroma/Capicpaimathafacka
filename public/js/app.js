@@ -44,7 +44,10 @@ const creationHistoryList = $('creation-history');
 function setStatus(state, label) {
   ['online', 'listening', 'speaking', 'alert'].forEach(c => document.body.classList.remove(c));
   if (state) document.body.classList.add(state);
-  if (label) statusText.textContent = label;
+  if (label) {
+    const lang = (wake.getLanguage?.() || 'en-US') === 'ko-KR' ? 'KO' : 'EN';
+    statusText.textContent = lang + ' · ' + label;
+  }
 }
 
 // ---------- Chat ----------
@@ -88,7 +91,9 @@ async function sendMessage(message) {
       if (half !== -1 && buf.indexOf(']]', half) === -1) safeEnd = half;
       const window = buf.slice(spokenIdx, safeEnd);
       // Find the LAST sentence boundary in the safe window.
-      const bRe = /[.!?…]["')\]]?(?=\s|$)/g;
+      // Sentence-end matcher — includes CJK fullwidth punctuation so
+      // Korean replies (which often use ．。！？) chunk correctly.
+      const bRe = /[.!?…．。！？]["')\]]?(?=\s|$)/g;
       let lastBoundary = -1;
       let m;
       while ((m = bRe.exec(window)) !== null) lastBoundary = m.index + m[0].length;
@@ -118,6 +123,14 @@ async function sendMessage(message) {
   // or text that was deferred while a partial [[emotion:...]] tag arrived).
   const tail = buf.slice(spokenIdx).trim();
   if (tail) voice.speakChunk(tail);
+  // Belt-and-braces: if nothing got queued during streaming (sentence
+  // boundaries never matched — common with short Korean replies that lack
+  // ASCII punctuation, or with single-line responses), force-speak the
+  // full visible reply so the user always hears Friday answer.
+  if (spokenIdx === 0 && !tail) {
+    const visible = buf.replace(/\[\[emotion:[a-z]+\]\]/i, '').trim();
+    if (visible) voice.speakChunk(visible);
+  }
 }
 
 function prettifyChatError(raw) {
@@ -139,6 +152,12 @@ chatForm.addEventListener('submit', (e) => {
   const v = chatInput.value.trim();
   if (!v && !pendingAttachments.length) return;
   chatInput.value = '';
+  // Route short commands ("Korean mode", "test voice", "open google", etc.)
+  // through the local-command dispatcher the same way voice commands do,
+  // so the user can type any of them with no attachments and have them
+  // execute locally instead of going to the chat model. Anything longer
+  // or with attachments still goes to chat.
+  if (v && !pendingAttachments.length && v.length <= 60 && tryLocalCommand(v)) return;
   sendMessage(v);
 });
 
@@ -346,6 +365,21 @@ function tryLocalCommand(text) {
     return true;
   }
 
+  // ---- Voice diagnostic ----
+  // "test voice" / "음성 테스트" — speaks a one-line confirmation in the
+  // current recognizer language so the user can immediately tell whether
+  // the TTS output path is alive.
+  if (/^(?:please\s+)?(?:test|check)\s+(?:the\s+)?(?:voice|audio|tts|speaker|sound)$/i.test(t)
+      || /^(?:음성|보이스)\s*(?:테스트|확인|체크)$/.test(t)) {
+    const ko = wake.getLanguage?.() === 'ko-KR';
+    const msg = ko
+      ? '음성 출력 테스트입니다. 잘 들리시면 한국어 음성이 정상입니다, 주인님.'
+      : 'Voice output test. If you can hear this, the audio path is working, sir.';
+    addBubble('friday', msg);
+    voice.speak(msg);
+    return true;
+  }
+
   // ---- Codegen panel ----
   if (/^(open|show)\s+(?:the\s+)?(builder|codegen|code\s+generation|build(?:er)?(?:\s+panel)?)$/.test(t)) {
     if (codegenPanel.hidden) { codegenPanel.hidden = false; btnCodegen.classList.add('active'); }
@@ -517,15 +551,21 @@ window.addEventListener('friday:shutdown', () => {
   setStatus(null, 'offline');
 });
 window.addEventListener('friday:status', (e) => { setStatus(null, e.detail); });
+// Refresh the status badge when the recognizer language changes so the
+// "EN"/"KO" prefix in the status bar always reflects the live state.
+window.addEventListener('friday:language', () => {
+  if (wake.isRunning()) setStatus('listening', wake.getMuted() ? 'muted' : 'listening');
+});
 // Live "what the recognizer is hearing" — confirms the mic is actually
 // feeding Web Speech. If you speak and nothing shows here, the browser is
 // not giving the recognizer audio (mic permission, or running inside
 // Replit's embedded preview iframe — open the app in its own browser tab).
 let hearingClear = null;
 window.addEventListener('friday:hearing', (e) => {
-  const { text, final } = e.detail || {};
+  const { text, final, lang } = e.detail || {};
   if (!text) return;
-  statusText.textContent = (final ? '“' : '… ') + text + (final ? '”' : '');
+  const tag = (lang === 'ko-KR' ? 'KO ' : 'EN ');
+  statusText.textContent = tag + (final ? '“' : '… ') + text + (final ? '”' : '');
   clearTimeout(hearingClear);
   hearingClear = setTimeout(() => {
     if (wake.isRunning()) setStatus('listening', wake.getMuted() ? 'muted' : 'listening');

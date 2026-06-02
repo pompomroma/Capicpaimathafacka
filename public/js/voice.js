@@ -259,11 +259,17 @@ async function speakOnce(entry) {
   // 'en-US' or 'ko-KR', auto-detected from the text content.
   const clean = entry.text;
   const lang = entry.lang;
-  ensureCtx();
+  try { console.log('[voice] speakOnce start', lang, 'fallback=', useFallback); } catch {}
+  try { ensureCtx(); }
+  catch (e) { try { console.warn('[voice] ensureCtx failed:', e?.message); } catch {} }
   if (useFallback) return speakFallback(clean, lang);
   try {
     const res = await api.tts(clean, lang);
-    if (res?.fallback) { useFallback = true; return speakFallback(clean, lang); }
+    if (res?.fallback) {
+      try { console.log('[voice] Riva fallback -> Web Speech'); } catch {}
+      useFallback = true;
+      return speakFallback(clean, lang);
+    }
     return await new Promise((resolve) => {
       let done = false;
       const finish = () => {
@@ -311,7 +317,9 @@ export function speakChunk(rawText) {
   dispatchEmotion(rawText);
   const clean = normalizeForSpeech(rawText);
   if (!clean) return;
-  speakQueue.push({ text: clean, lang: detectLang(clean) });
+  const lang = detectLang(clean);
+  try { console.log('[voice] speakChunk', lang, JSON.stringify(clean.slice(0, 60))); } catch {}
+  speakQueue.push({ text: clean, lang });
   startDraining();
 }
 

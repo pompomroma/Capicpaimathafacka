@@ -40,10 +40,20 @@ const WAKE_PATTERNS = [
 // Korean: how Korean speakers address Friday in Hangul. Web Speech in
 // ko-KR mode transcribes utterances as Hangul, so these patterns target
 // the Hangul forms (vocative, casual, with optional "헤이/야" prefix).
+// Broadened to cover the common ASR variants Chrome's Korean engine
+// actually emits.
 const KO_WAKE_PATTERNS = [
   /프라이데이/,
-  /후라이데이/,
   /프라이대이/,
+  /프라이디/,
+  /프라이디이/,
+  /후라이데이/,
+  /후라이디/,
+  /파라이데이/,
+  /플라이데이/,
+  /프라이데/,
+  /프리데이/,
+  /프리이데이/,
 ];
 function detectWake(text) {
   for (const rx of WAKE_PATTERNS) if (rx.test(text)) return true;
@@ -90,7 +100,13 @@ export function setLanguage(lang) {
   try { webspeech?.abort?.(); } catch (_) {}
   recognizerActive = false;
   webspeech = makeRecognizer();
-  if (running && !muted && !speaking) safeStartRecognizer();
+  // Defer the start by 300 ms — gives Chrome time to finish tearing down
+  // the old recognizer before the new one calls start(). The watchdog
+  // (1.5 s) backstops this if the immediate restart loses the race.
+  clearTimeout(resumeTimer);
+  if (running && !muted && !speaking) {
+    resumeTimer = setTimeout(() => safeStartRecognizer(), 300);
+  }
   emit('language', currentLang);
   return currentLang;
 }
@@ -159,7 +175,19 @@ function makeRecognizer() {
       const txt = (res[0]?.transcript || '').trim();
       if (!txt) continue;
       LOG('heard', res.isFinal ? 'FINAL' : 'interim', JSON.stringify(txt), 'mode=', mode);
-      emit('hearing', { text: txt, final: !!res.isFinal, mode });
+      // Auto-language detection: if Hangul (Korean) shows up while we are
+      // running in en-US, switch to ko-KR so subsequent utterances are
+      // transcribed properly. Symmetric for the reverse direction (long
+      // ASCII transcript while in ko-KR).
+      const hasHangul = /[가-힯]/.test(txt);
+      if (hasHangul && currentLang === 'en-US') {
+        LOG('auto-switch -> ko-KR (heard Hangul)');
+        setLanguage('ko-KR');
+      } else if (!hasHangul && currentLang === 'ko-KR' && res.isFinal && txt.length > 4 && /^[\x00-\x7F]+$/.test(txt)) {
+        LOG('auto-switch -> en-US (heard ASCII while in ko-KR)');
+        setLanguage('en-US');
+      }
+      emit('hearing', { text: txt, final: !!res.isFinal, mode, lang: currentLang });
       handleTranscript(txt, !!res.isFinal);
     }
   };
