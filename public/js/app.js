@@ -18,6 +18,7 @@ const chatInput = $('chat-input');
 const statusText = $('status-text');
 const userEmail = $('user-email');
 const btnMic = $('btn-mic');
+const btnLang = $('btn-lang');
 const btnWake = $('btn-wake');
 const btnCamera = $('btn-camera');
 const btnVR = $('btn-vr');
@@ -587,6 +588,28 @@ function setMute(v) {
 }
 btnMic.addEventListener('click', () => setMute(!wake.getMuted()));
 
+// ---------- Language toggle button (English ⇄ Korean voice input) ----------
+function refreshLangButton() {
+  const ko = wake.getLanguage?.() === 'ko-KR';
+  if (btnLang) {
+    btnLang.querySelector('.lbl').textContent = ko ? 'KO' : 'EN';
+    btnLang.classList.toggle('active', ko);
+    btnLang.title = ko
+      ? 'voice input: Korean (tap for English)'
+      : 'voice input: English (tap for Korean)';
+  }
+}
+btnLang?.addEventListener('click', () => {
+  const ko = wake.getLanguage?.() === 'ko-KR';
+  const next = ko ? 'en-US' : 'ko-KR';
+  wake.setLanguage?.(next);
+  refreshLangButton();
+  addSys(next === 'ko-KR' ? 'Voice input: Korean. 음성 입력: 한국어.' : 'Voice input: English.');
+});
+// Keep the button in sync when the language changes by any means (voice
+// command, text command, or Hangul auto-detection in wake.js).
+window.addEventListener('friday:language', refreshLangButton);
+
 btnWake.addEventListener('click', async () => {
   if (wake.isRunning()) {
     wake.stop(); btnWake.classList.remove('active');
@@ -670,6 +693,7 @@ function init() {
   face.init(canvas);
   document.body.classList.remove('boot');
   setStatus('online', 'standby');
+  refreshLangButton();
   addSys('Friday online. Press the power icon to begin listening, or type below.');
   // Restore last 8 chat messages
   api.chatHistory().then(({ messages = [] }) => {
