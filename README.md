@@ -22,7 +22,7 @@ A Jarvis-style web AI assistant powered by NVIDIA NIM. Drops into a blank Replit
    - `NIM_KEY_REASONING` — chat LLM + Riva TTS/STT
    - `NIM_KEY_VISION` — vision model
    - `NIM_KEY_CODEGEN` — code generation model
-   - `JWT_SECRET` — any long random string
+   - `JWT_SECRET` — *optional*; if unset, the server auto-generates and persists one to `data/.jwt-secret` on first boot
 2. On Replit: import this repo into a blank Node template, set the secrets above, hit **Run**.
 3. Locally: `npm install && npm start`, open http://localhost:3000.
 

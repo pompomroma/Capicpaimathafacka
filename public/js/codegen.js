@@ -69,6 +69,8 @@ form.addEventListener('submit', async (e) => {
       } else if (p.phase === 'verifying') {
         const miss = (p.missing || []).length;
         setStatus(`Filling in ${miss} remaining file${miss === 1 ? '' : 's'}…`);
+      } else if (p.phase === 'saved') {
+        setStatus(`Saved ${p.files} files to ${p.dir}/ in the project.`);
       }
     });
     current = { ...res, goal };
@@ -76,6 +78,7 @@ form.addEventListener('submit', async (e) => {
     if (res.stack) parts.push(`in ${res.stack}`);
     parts.push(`. Entry: ${res.entry}.`);
     if (res.run) parts.push(` Run: ${res.run}.`);
+    if (res.savedTo) parts.push(` Saved to ${res.savedTo}/.`);
     if (res.notes) parts.push(` — ${res.notes}`);
     setStatus(parts.join(''));
     renderFileList();

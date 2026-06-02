@@ -44,7 +44,9 @@ app.listen(PORT, '0.0.0.0', () => {
   if (!process.env.NIM_KEY_REASONING) missing.push('NIM_KEY_REASONING');
   if (!process.env.NIM_KEY_VISION) missing.push('NIM_KEY_VISION');
   if (!process.env.NIM_KEY_CODEGEN) missing.push('NIM_KEY_CODEGEN');
-  if (!process.env.JWT_SECRET) missing.push('JWT_SECRET');
+  // JWT_SECRET intentionally omitted — middleware auto-generates and
+  // persists one in data/.jwt-secret on first boot, so the app works out
+  // of the box without setting it in Replit Secrets.
   if (missing.length) {
     console.warn(`[warning] missing env vars: ${missing.join(', ')}. Some features will not work.`);
   }
