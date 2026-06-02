@@ -41,8 +41,8 @@ function ensureCtx() {
   loop();
 }
 
-// ---------- voice picker ----------
-const PREFERRED_VOICES = [
+// ---------- voice picker (English + Korean) ----------
+const EN_PREFERRED_VOICES = [
   /^Google US English$/i,
   /Microsoft Aria.*United States/i,
   /Microsoft Jenny.*United States/i,
@@ -51,13 +51,32 @@ const PREFERRED_VOICES = [
   /^Allison$/i,
   /^Ava$/i,
 ];
+const KO_PREFERRED_VOICES = [
+  /Google.*한국|Google.*Korean|Korean.*Google/i,
+  /Microsoft Heami/i,
+  /Microsoft SunHi/i,
+  /Microsoft InJoon/i,
+  /^Yuna$/i, // macOS Korean voice
+];
 
-function pickBestVoice() {
+let pickedVoiceEN = null;
+let pickedVoiceKO = null;
+
+function pickBestVoice(lang) {
   const voices = (window.speechSynthesis?.getVoices?.() || []).filter(Boolean);
   if (!voices.length) return null;
-  for (const rx of PREFERRED_VOICES) {
+  const isKo = lang === 'ko-KR' || lang === 'ko';
+  const prefs = isKo ? KO_PREFERRED_VOICES : EN_PREFERRED_VOICES;
+  for (const rx of prefs) {
     const v = voices.find((vv) => rx.test(vv.name));
     if (v) return v;
+  }
+  if (isKo) {
+    const koExact = voices.find((v) => v.lang === 'ko-KR' || v.lang === 'ko_KR');
+    if (koExact) return koExact;
+    const anyKo = voices.find((v) => /^ko[-_]/i.test(v.lang));
+    if (anyKo) return anyKo;
+    return null; // no Korean voice available; let the caller fall back
   }
   const usExact = voices.find((v) => v.lang === 'en-US');
   if (usExact) return usExact;
@@ -65,17 +84,22 @@ function pickBestVoice() {
   return anyEn || voices[0];
 }
 
-function refreshVoice() {
-  const v = pickBestVoice();
-  if (v && v !== pickedVoice) {
-    pickedVoice = v;
-    try { console.log('[voice] using', v.name, v.lang); } catch {}
-  }
+function refreshVoices() {
+  const en = pickBestVoice('en-US');
+  const ko = pickBestVoice('ko-KR');
+  if (en && en !== pickedVoiceEN) { pickedVoiceEN = en; try { console.log('[voice] EN using', en.name, en.lang); } catch {} }
+  if (ko && ko !== pickedVoiceKO) { pickedVoiceKO = ko; try { console.log('[voice] KO using', ko.name, ko.lang); } catch {} }
+  pickedVoice = pickedVoiceEN; // back-compat; per-utterance picker overrides
+}
+
+// Detect Hangul (Korean script) anywhere in the text → use Korean voice.
+function detectLang(text) {
+  return /[가-힯]/.test(String(text || '')) ? 'ko-KR' : 'en-US';
 }
 
 if (typeof window !== 'undefined' && window.speechSynthesis) {
-  refreshVoice();
-  try { window.speechSynthesis.onvoiceschanged = refreshVoice; } catch {}
+  refreshVoices();
+  try { window.speechSynthesis.onvoiceschanged = refreshVoices; } catch {}
 }
 
 // ---------- one-time warm-up on first user gesture ----------
@@ -118,19 +142,24 @@ function normalizeForSpeech(text) {
   let s = String(text);
   // Strip emotion tag.
   s = s.replace(/\[\[emotion:[a-z]+\]\]/ig, '');
-  // Strip markdown emphasis and inline code.
+  // Strip markdown emphasis and inline code (both languages).
   s = s.replace(/```[\s\S]*?```/g, ' ');                  // code blocks → drop
   s = s.replace(/`([^`]+)`/g, '$1');                       // inline code → text
   s = s.replace(/\*\*([^*]+)\*\*/g, '$1');                 // bold
   s = s.replace(/(?<!\*)\*(?!\*)([^*]+)\*(?!\*)/g, '$1');  // italic
   s = s.replace(/^[ \t]*[-*•]\s+/gm, '');                  // list bullets
   s = s.replace(/^#{1,6}\s+/gm, '');                       // markdown headings
-  // Punctuation normalization.
+  // Punctuation normalization (safe for both languages).
   s = s.replace(/[—–]/g, ', ');
   s = s.replace(/\.{3,}/g, ', ');
-  s = s.replace(/\s+&\s+/g, ' and ');
-  // Acronyms — whole-word only.
-  s = s.replace(/\b([A-Z]{2,5})\b/g, (m) => ACRONYMS[m] || m);
+  // English-only transformations (acronym spell-out, "&" → "and"). These
+  // would mangle Korean text or accidentally letter-spell embedded ASCII
+  // terms, so skip them when the text contains Hangul.
+  const isKo = /[가-힯]/.test(s);
+  if (!isKo) {
+    s = s.replace(/\s+&\s+/g, ' and ');
+    s = s.replace(/\b([A-Z]{2,5})\b/g, (m) => ACRONYMS[m] || m);
+  }
   // Collapse whitespace.
   s = s.replace(/\s+/g, ' ').trim();
   return s;
@@ -154,16 +183,13 @@ function splitSentences(text) {
   return out.length ? out : [text];
 }
 
-function speakSentenceWebSpeech(text) {
+function speakSentenceWebSpeech(text, lang) {
   return new Promise((resolve) => {
     if (!window.speechSynthesis) { resolve(); return; }
-    if (!pickedVoice) refreshVoice();
+    if (!pickedVoiceEN && !pickedVoiceKO) refreshVoices();
+    const isKo = lang === 'ko-KR';
+    const voice = isKo ? (pickedVoiceKO || pickedVoiceEN) : (pickedVoiceEN || pickedVoiceKO);
     let done = false;
-    // Chrome's speechSynthesis sometimes never fires onend (a long-standing
-    // engine bug). Without a guard the speak queue hangs forever, which keeps
-    // friday:speaking=true and leaves the wake recognizer permanently paused.
-    // Force-resolve after an estimated max duration (~100 ms/char + 2 s,
-    // capped at 30 s) and cancel the stuck utterance.
     const estMs = Math.min(30000, 2000 + text.length * 100);
     const finish = () => {
       if (done) return;
@@ -177,9 +203,9 @@ function speakSentenceWebSpeech(text) {
     }, estMs);
     try {
       const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'en-US';
-      if (pickedVoice) u.voice = pickedVoice;
-      u.rate = 0.98;
+      u.lang = isKo ? 'ko-KR' : 'en-US';
+      if (voice) u.voice = voice;
+      u.rate = isKo ? 1.0 : 0.98;
       u.pitch = 1.0;
       u.volume = 1.0;
       u.onend = finish;
@@ -189,12 +215,11 @@ function speakSentenceWebSpeech(text) {
   });
 }
 
-function speakFallback(text) {
+function speakFallback(text, lang) {
+  const utteranceLang = lang || detectLang(text);
   return new Promise(async (resolve) => {
     try { window.speechSynthesis?.cancel?.(); } catch {}
     window.dispatchEvent(new CustomEvent('friday:speaking', { detail: true }));
-    // Synthetic amplitude loop for lip-sync since Web Speech audio is not
-    // exposed via Web Audio.
     let synthRunning = true;
     const start = performance.now();
     const fakeLoop = () => {
@@ -207,7 +232,7 @@ function speakFallback(text) {
     fakeLoop();
     const sentences = splitSentences(text);
     for (const s of sentences) {
-      await speakSentenceWebSpeech(s);
+      await speakSentenceWebSpeech(s, utteranceLang);
     }
     synthRunning = false;
     window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false }));
@@ -225,17 +250,20 @@ function speakFallback(text) {
 // speak(text) keeps the original "speak this whole thing and resolve
 // when done" semantics by enqueuing then awaiting the drain.
 
-const speakQueue = [];
+const speakQueue = []; // entries: { text, lang }
 let drainPromise = null;
 
-async function speakOnce(clean) {
-  // The actual single-utterance play path. `clean` is already passed
-  // through normalizeForSpeech by the caller (speakChunk).
+async function speakOnce(entry) {
+  // The actual single-utterance play path. `entry.text` is already passed
+  // through normalizeForSpeech by the caller (speakChunk). `entry.lang` is
+  // 'en-US' or 'ko-KR', auto-detected from the text content.
+  const clean = entry.text;
+  const lang = entry.lang;
   ensureCtx();
-  if (useFallback) return speakFallback(clean);
+  if (useFallback) return speakFallback(clean, lang);
   try {
-    const res = await api.tts(clean);
-    if (res?.fallback) { useFallback = true; return speakFallback(clean); }
+    const res = await api.tts(clean, lang);
+    if (res?.fallback) { useFallback = true; return speakFallback(clean, lang); }
     return await new Promise((resolve) => {
       let done = false;
       const finish = () => {
@@ -245,20 +273,17 @@ async function speakOnce(clean) {
         window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false }));
         resolve();
       };
-      // Absolute safety cap so a stalled audio stream can never hang the
-      // queue and leave friday:speaking=true (which would pause the
-      // wake recognizer indefinitely).
       const safety = setTimeout(finish, 60000);
       audioEl.src = res.url;
       audioEl.onended = finish;
       audioEl.onerror = finish;
       audioEl.play()
         .then(() => window.dispatchEvent(new CustomEvent('friday:speaking', { detail: true })))
-        .catch(() => { clearTimeout(safety); useFallback = true; speakFallback(clean).then(finish); });
+        .catch(() => { clearTimeout(safety); useFallback = true; speakFallback(clean, lang).then(finish); });
     });
   } catch (e) {
     useFallback = true;
-    return speakFallback(clean);
+    return speakFallback(clean, lang);
   }
 }
 
@@ -279,12 +304,14 @@ function startDraining() {
 
 // Append a chunk (sentence, partial reply, etc.) to the speech queue.
 // Safe to call repeatedly as deltas arrive from a streaming chat reply.
+// Language is auto-detected per chunk (Hangul presence → ko-KR; else en-US),
+// so a mixed reply speaks each part with the correct voice.
 export function speakChunk(rawText) {
   if (!rawText) return;
   dispatchEmotion(rawText);
   const clean = normalizeForSpeech(rawText);
   if (!clean) return;
-  speakQueue.push(clean);
+  speakQueue.push({ text: clean, lang: detectLang(clean) });
   startDraining();
 }
 

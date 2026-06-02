@@ -20,12 +20,8 @@ import * as api from './api.js';
 
 const LOG = (...a) => { try { console.log('[friday]', ...a); } catch {} };
 
-// ---- wake matching ----
-// Permissive list of common ASR mistranscriptions of "Friday". Using \b
-// boundaries lets these match wherever the wake word appears in the
-// utterance (start, middle, after punctuation, etc.) without the
-// previous regex's strict (^|\W)...(\W|$) wrappers that failed on
-// trailing 's, possessives, or word-merged transcriptions.
+// ---- wake matching (English + Korean) ----
+// English: permissive list of common ASR mistranscriptions of "Friday".
 const WAKE_PATTERNS = [
   /\bfriday'?s?\b/i,
   /\bfri[\s\-]day'?s?\b/i,
@@ -41,8 +37,17 @@ const WAKE_PATTERNS = [
   /\bfreeway\b/i,    // sometimes Chrome hears "Friday" as "freeway"
   /\bfryday\b/i,
 ];
+// Korean: how Korean speakers address Friday in Hangul. Web Speech in
+// ko-KR mode transcribes utterances as Hangul, so these patterns target
+// the Hangul forms (vocative, casual, with optional "헤이/야" prefix).
+const KO_WAKE_PATTERNS = [
+  /프라이데이/,
+  /후라이데이/,
+  /프라이대이/,
+];
 function detectWake(text) {
   for (const rx of WAKE_PATTERNS) if (rx.test(text)) return true;
+  for (const rx of KO_WAKE_PATTERNS) if (rx.test(text)) return true;
   return false;
 }
 function stripWake(text) {
@@ -50,12 +55,45 @@ function stripWake(text) {
   for (const rx of WAKE_PATTERNS) {
     s = s.replace(new RegExp(rx.source, rx.flags + (rx.flags.includes('g') ? '' : 'g')), ' ');
   }
-  // also strip an optional leading polite prefix (hey/okay/ok/yo) plus any
-  // surrounding punctuation/whitespace
+  for (const rx of KO_WAKE_PATTERNS) {
+    s = s.replace(new RegExp(rx.source, 'g'), ' ');
+  }
+  // Strip optional polite prefix in either language.
   s = s.replace(/^(?:\s*(?:hey|okay|ok|yo)\W*)+/i, ' ');
+  s = s.replace(/^(?:\s*(?:헤이|야|어이|저기요?)\s*[,.]?\s*)+/, ' ');
+  // Drop Korean vocative particles attached after the wake word ("프라이데이야/여/님").
+  s = s.replace(/^\s*[야여님씨]\s+/, ' ');
   return s.replace(/\s+/g, ' ').trim();
 }
 const SHUTDOWN_PHRASE = 'disconnect all systems';
+const KO_SHUTDOWN_PATTERNS = [
+  /모든\s*시스템\s*종료/,
+  /시스템\s*종료/,
+  /프라이데이\s*종료/,
+  /모든\s*시스템\s*오프/,
+];
+function detectShutdown(text) {
+  if (text.includes(SHUTDOWN_PHRASE)) return true;
+  for (const rx of KO_SHUTDOWN_PATTERNS) if (rx.test(text)) return true;
+  return false;
+}
+// Active recognizer language. Defaults to en-US; user can switch with a
+// voice or text command (handled in app.js via setLanguage()).
+let currentLang = 'en-US';
+export function getLanguage() { return currentLang; }
+export function setLanguage(lang) {
+  const next = (lang === 'ko-KR' || lang === 'ko') ? 'ko-KR' : 'en-US';
+  if (next === currentLang) return currentLang;
+  currentLang = next;
+  LOG('language switched to', currentLang);
+  // Rebuild the recognizer so it picks up the new lang setting.
+  try { webspeech?.abort?.(); } catch (_) {}
+  recognizerActive = false;
+  webspeech = makeRecognizer();
+  if (running && !muted && !speaking) safeStartRecognizer();
+  emit('language', currentLang);
+  return currentLang;
+}
 
 // ---- timing ----
 const COMMAND_TIMEOUT_MS = 10000; // how long to wait for a command after bare wake
@@ -112,7 +150,7 @@ function makeRecognizer() {
   const r = new SR();
   r.continuous = true;
   r.interimResults = true;
-  r.lang = 'en-US';
+  r.lang = currentLang; // 'en-US' or 'ko-KR' — switched via setLanguage()
   r.maxAlternatives = 1;
   r.onresult = (ev) => {
     if (muted || !running) return;
@@ -297,8 +335,8 @@ function clearCaptureInterim() {
 function handleTranscript(rawText, isFinal) {
   const text = rawText.toLowerCase();
 
-  // Shutdown matches anywhere, anytime.
-  if (text.includes(SHUTDOWN_PHRASE)) {
+  // Shutdown matches anywhere, anytime (English or Korean).
+  if (detectShutdown(text)) {
     LOG('shutdown phrase detected');
     emit('shutdown');
     return;

@@ -329,6 +329,23 @@ function tryLocalCommand(text) {
   if (/^mute(\s+mic(rophone)?)?$/.test(t) || /\bmute (the )?microphone\b/.test(t)) { setMute(true); return true; }
   if (/^unmute/.test(t) || /\bunmute (the )?microphone\b/.test(t)) { setMute(false); return true; }
 
+  // ---- Language switch (English ⇄ Korean) ----
+  // Switch the recognizer's language so wake + commands work in Korean
+  // (Hangul). Voice output language is detected from the reply text per
+  // chunk, so no separate setting is needed there.
+  if (/^(?:please\s+)?(?:switch\s+to\s+|use\s+|set\s+(?:to\s+)?|change\s+to\s+|enable\s+|talk\s+in\s+|speak\s+(?:in\s+)?)?(?:korean(?:\s+mode)?|한국어(?:\s*모드)?|한글(?:\s*모드)?)$/i.test(t)
+      || /^한국어로$/.test(t)) {
+    wake.setLanguage?.('ko-KR');
+    addSys('Korean mode engaged. 한국어 모드를 켰습니다.');
+    return true;
+  }
+  if (/^(?:please\s+)?(?:switch\s+to\s+|use\s+|set\s+(?:to\s+)?|change\s+to\s+|enable\s+|talk\s+in\s+|speak\s+(?:in\s+)?)?(?:english(?:\s+mode)?|영어(?:\s*모드)?)$/i.test(t)
+      || /^영어로$/.test(t)) {
+    wake.setLanguage?.('en-US');
+    addSys('English mode engaged.');
+    return true;
+  }
+
   // ---- Codegen panel ----
   if (/^(open|show)\s+(?:the\s+)?(builder|codegen|code\s+generation|build(?:er)?(?:\s+panel)?)$/.test(t)) {
     if (codegenPanel.hidden) { codegenPanel.hidden = false; btnCodegen.classList.add('active'); }

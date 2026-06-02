@@ -46,12 +46,13 @@ export async function* chatStream(message, attachments) {
   }
 }
 
-export async function tts(text) {
+export async function tts(text, lang) {
+  const body = lang ? { text, lang } : { text };
   const r = await fetch('/api/tts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
