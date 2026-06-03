@@ -39,11 +39,16 @@ const router = express.Router();
 const NIM_URL = process.env.NIM_URL || 'https://integrate.api.nvidia.com/v1/chat/completions';
 const MODEL = process.env.CODEGEN_MODEL || 'qwen/qwen3-coder-480b-a35b-instruct';
 
-const PER_CALL_TOKENS = 16384;  // per request
-const MAX_CONT_ROUNDS = 6;      // continuation rounds for the build stage
-const MAX_RECOVERY_ROUNDS = 2;  // targeted missing-file rounds
-const MAX_FILES = 40;
+const PER_CALL_TOKENS = 32768;  // per request (Qwen3-Coder-480B supports it)
+const ARCHITECT_TOKENS = 12288; // larger budget for the manifest stage
+const MAX_CONT_ROUNDS = 8;      // continuation rounds for the build stage
+const MAX_RECOVERY_ROUNDS = 3;  // targeted missing-file/thin-file rounds
+const MAX_FILES = 50;
 const MAX_FILE_BYTES = 64 * 1024;
+// Files smaller than this many bytes are treated as thin stubs and queued
+// for recovery, unless they look like legitimate config stubs.
+const THIN_FILE_BYTES = 180;
+const CONFIG_STUB_RE = /(^|\/)(\.gitignore|\.env|\.env\.example|requirements\.txt|LICENSE|Procfile|\.npmrc|\.eslintrc(\.[^/]+)?)$/i;
 
 // ---------- low-level model call ----------
 async function callModelRaw(messages, maxTokens) {
@@ -240,7 +245,7 @@ router.post('/codegen', requireAuth, async (req, res) => {
         { role: 'system', content: CODEGEN_ARCHITECT },
         { role: 'user', content: `App goal: ${goal}` },
       ],
-      8192,
+      ARCHITECT_TOKENS,
     ).then(r => r.content).catch(() => '');
     const manifest = parseManifest(manifestRaw) || { files: [], stack: '', run: '', entry: '', notes: '' };
     if (aborted) return;
@@ -265,24 +270,50 @@ router.post('/codegen', requireAuth, async (req, res) => {
     if (!parsed.files.length) return fail('model emitted only empty files', raw);
 
     // ---- Stage C: completeness check + recovery ----
+    // A "needs recovery" file is either (a) listed in the manifest but
+    // missing from the output, or (b) emitted with a suspiciously thin
+    // body (under THIN_FILE_BYTES) that doesn't look like a config stub.
+    // This catches the failure mode where the model wrote a one-line
+    // placeholder for a planned file ("// TODO" or similar) and then
+    // moved on, which used to slip past the simple presence check.
     if (manifest.files.length) {
-      let have = new Set(parsed.files.map(f => f.path));
-      let missing = manifest.files.filter(p => !have.has(p));
+      const byPath = () => new Map(parsed.files.map(f => [f.path, f]));
+      const needsRecovery = () => {
+        const m = byPath();
+        const out = [];
+        for (const p of manifest.files) {
+          const f = m.get(p);
+          if (!f) { out.push(p); continue; }
+          if (f.content.length < THIN_FILE_BYTES && !CONFIG_STUB_RE.test(p)) {
+            out.push(p);
+          }
+        }
+        return out;
+      };
+      let needs = needsRecovery();
       let recovery = 0;
-      while (missing.length && recovery < MAX_RECOVERY_ROUNDS && !aborted) {
+      while (needs.length && recovery < MAX_RECOVERY_ROUNDS && !aborted) {
         recovery++;
-        send({ phase: 'verifying', missing });
-        const recPrompt = `App goal: ${goal}\n\nEmit ONLY these missing files, each complete and runnable, in the === FILE: path === / === END FILE === format. Do not emit any other files.\n${missing.map(f => '- ' + f).join('\n')}`;
+        send({ phase: 'verifying', missing: needs });
+        const recPrompt = `App goal: ${goal}\n\nEmit ONLY these files, each COMPLETE and RUNNABLE with substantial real code (not a stub), in the === FILE: path === / === END FILE === format. Do not emit any other files.\n${needs.map(f => '- ' + f).join('\n')}`;
         const recRaw = await generateWithContinuation(CODEGEN_SYSTEM, recPrompt).catch(() => '');
         const recParsed = parseBlocks(recRaw);
         if (recParsed?.files?.length) {
+          const have = byPath();
           for (const f of sanitize(recParsed.files)) {
-            if (!have.has(f.path)) { parsed.files.push(f); have.add(f.path); }
+            const prev = have.get(f.path);
+            // Replace if it was missing OR was a thin stub the recovery
+            // round improved on.
+            if (!prev) { parsed.files.push(f); }
+            else if (f.content.length > prev.content.length) {
+              const idx = parsed.files.indexOf(prev);
+              if (idx !== -1) parsed.files[idx] = f;
+            }
           }
         }
-        const stillMissing = manifest.files.filter(p => !have.has(p));
-        if (stillMissing.length === missing.length) break; // no progress
-        missing = stillMissing;
+        const stillNeeds = needsRecovery();
+        if (stillNeeds.length === needs.length) break; // no progress
+        needs = stillNeeds;
       }
     }
     if (aborted) return;
