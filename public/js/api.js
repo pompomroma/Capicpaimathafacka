@@ -8,8 +8,11 @@ export async function logout() {
   await fetch('/api/logout', { method: 'POST', credentials: 'include' });
 }
 
-export async function* chatStream(message, attachments) {
-  const body = (attachments && attachments.length) ? { message, attachments } : { message };
+export async function* chatStream(message, attachments, userLang) {
+  const body = {};
+  body.message = message;
+  if (attachments && attachments.length) body.attachments = attachments;
+  if (userLang) body.userLang = userLang;
   const r = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

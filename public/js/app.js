@@ -76,7 +76,11 @@ async function sendMessage(message) {
   let buf = '';
   let spokenIdx = 0; // how many chars of `buf` have already been queued for TTS
   try {
-    for await (const delta of api.chatStream(message, atts.map(a => a.payload))) {
+    // Pass the active recognizer language so the server can lock the
+    // reply to Korean when the user is in Korean mode (the model's
+    // bilingual hint is too soft on short messages).
+    const userLang = wake.getLanguage?.() || 'en-US';
+    for await (const delta of api.chatStream(message, atts.map(a => a.payload), userLang)) {
       buf += delta;
       if (inflightBubble) {
         // strip emotion tag from visible text

@@ -73,7 +73,7 @@ function buildUserTurn(message, attachments) {
 }
 
 router.post('/chat', requireAuth, async (req, res) => {
-  const { message, attachments } = req.body || {};
+  const { message, attachments, userLang } = req.body || {};
   const userText = typeof message === 'string' ? message : '';
   const hasAtts = Array.isArray(attachments) && attachments.length > 0;
   if (!userText.trim() && !hasAtts) {
@@ -81,6 +81,15 @@ router.post('/chat', requireAuth, async (req, res) => {
   }
 
   const turn = buildUserTurn(userText, attachments);
+
+  // Language lock — figure out the language the user is actually using and
+  // force the model to reply in it. Llama 3.3 70B follows the soft
+  // bilingual hint in SYSTEM_FRIDAY only intermittently, especially on
+  // short messages, so we layer a hard per-turn system message on top.
+  // Trigger: explicit userLang hint from the client OR Hangul in the
+  // typed/spoken text.
+  const hasHangul = /[가-힯]/.test(userText);
+  const replyKo = (userLang === 'ko-KR' || userLang === 'ko') || hasHangul;
 
   // Route-aware key + model selection.
   const route = turn.route;
@@ -103,6 +112,14 @@ router.post('/chat', requireAuth, async (req, res) => {
   // only the current user message (some vision models don't accept long
   // text-only history alongside multimodal content).
   const messages = [{ role: 'system', content: SYSTEM_FRIDAY }];
+  if (replyKo) {
+    // Hard language lock — overrides the soft bilingual hint in
+    // SYSTEM_FRIDAY when the user is in Korean mode or wrote Hangul.
+    messages.push({
+      role: 'system',
+      content: '이번 응답은 반드시 자연스러운 한국어 존댓말로만 작성하세요. 영어로 답변하지 마세요. 주인님을 "주인님" 또는 "사장님"으로 부르고, JARVIS 스타일의 위트와 간결함을 유지하세요. 마지막에는 [[emotion:X]] 태그를 영어 형식 그대로 한 줄 붙이세요.\n\n[Reply in Korean only. Use natural 존댓말. Do not mix English. Keep the JARVIS-style wit + brevity. End with the literal [[emotion:X]] tag on its own line.]',
+    });
+  }
   if (route === 'chat') {
     const recent = q.recentMessages.all(req.user.id, 20).reverse();
     // The latest entry IS the message we just persisted; replace its
