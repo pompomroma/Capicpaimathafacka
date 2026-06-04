@@ -230,8 +230,13 @@ function speakFallback(text, lang) {
       requestAnimationFrame(fakeLoop);
     };
     fakeLoop();
-    const sentences = splitSentences(text);
-    for (const s of sentences) {
+    // Speak the whole chunk as ONE utterance — Web Speech handles the
+    // internal sentence prosody, and a single utterance avoids the audible
+    // gaps that one-utterance-per-sentence produced. Only split a very long
+    // chunk (> 320 chars) to keep each utterance's duration bounded so the
+    // onend-timeout safety stays meaningful.
+    const segments = text.length > 320 ? splitSentences(text) : [text];
+    for (const s of segments) {
       await speakSentenceWebSpeech(s, utteranceLang);
     }
     synthRunning = false;

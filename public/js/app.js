@@ -75,6 +75,7 @@ async function sendMessage(message) {
   inflightBubble = addBubble('friday', '');
   let buf = '';
   let spokenIdx = 0; // how many chars of `buf` have already been queued for TTS
+  let spokenSomething = false; // has the first chunk been spoken yet?
   try {
     // Pass the active recognizer language so the server can lock the
     // reply to Korean when the user is in Korean mode (the model's
@@ -87,24 +88,31 @@ async function sendMessage(message) {
         inflightBubble.textContent = buf.replace(/\[\[emotion:[a-z]+\]\]/i, '').trim();
         chatLog.scrollTop = chatLog.scrollHeight;
       }
-      // Stream-speak: speak completed sentences as they arrive so Friday
-      // talks while the rest of the reply is still being written.
-      // Avoid feeding any text that contains an unclosed "[[" (a partial
-      // [[emotion:x]] tag mid-arrival) — wait until it closes.
+      // Stream-speak with ADAPTIVE chunking for fluency:
+      //  - the FIRST chunk is spoken as soon as one sentence is ready, so
+      //    Friday starts talking with minimal latency;
+      //  - every chunk AFTER that is batched until it reaches ~MIN_REST
+      //    characters, so the reply is delivered in a few larger pieces
+      //    instead of many tiny ones. Fewer utterance boundaries = far
+      //    fewer gaps = noticeably smoother speech (this matters most for
+      //    the Riva path, where each chunk is a separate audio load).
+      // Avoid feeding text with an unclosed "[[" (a partial [[emotion:x]]
+      // tag mid-arrival) — wait until it closes.
       let safeEnd = buf.length;
       const half = buf.indexOf('[[', spokenIdx);
       if (half !== -1 && buf.indexOf(']]', half) === -1) safeEnd = half;
-      const window = buf.slice(spokenIdx, safeEnd);
-      // Find the LAST sentence boundary in the safe window.
+      const win = buf.slice(spokenIdx, safeEnd);
       // Sentence-end matcher — includes CJK fullwidth punctuation so
       // Korean replies (which often use ．。！？) chunk correctly.
       const bRe = /[.!?…．。！？]["')\]]?(?=\s|$)/g;
       let lastBoundary = -1;
       let m;
-      while ((m = bRe.exec(window)) !== null) lastBoundary = m.index + m[0].length;
-      if (lastBoundary > 0) {
-        const chunk = window.slice(0, lastBoundary).trim();
-        if (chunk) voice.speakChunk(chunk);
+      while ((m = bRe.exec(win)) !== null) lastBoundary = m.index + m[0].length;
+      const MIN_REST = 160; // batch size for chunks after the first
+      const minChunk = spokenSomething ? MIN_REST : 1;
+      if (lastBoundary >= minChunk) {
+        const chunk = win.slice(0, lastBoundary).trim();
+        if (chunk) { voice.speakChunk(chunk); spokenSomething = true; }
         spokenIdx += lastBoundary;
       }
     }

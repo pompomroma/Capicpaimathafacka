@@ -296,9 +296,11 @@ window.addEventListener('friday:speaking', (e) => {
     // speaking — never while the recognizer is the sole mic consumer.
     getMic().catch(() => {});
   } else if (running && !muted) {
-    LOG('TTS done — resuming recognizer in 350 ms');
+    // Resume listening sooner after Friday finishes (was 350 ms) for
+    // snappier turn-taking; 220 ms is still enough to clear the TTS tail.
+    LOG('TTS done — resuming recognizer in 220 ms');
     clearTimeout(resumeTimer);
-    resumeTimer = setTimeout(() => safeStartRecognizer(), 350);
+    resumeTimer = setTimeout(() => safeStartRecognizer(), 220);
   }
 });
 
@@ -352,7 +354,8 @@ function armCommandTimeout() {
 // command, instead of waiting forever for a final that may never arrive.
 let captureInterimBuf = '';
 let captureInterimTimer = null;
-const INTERIM_STABLE_MS = 1100;
+const INTERIM_STABLE_MS = 850; // snappier command delivery (was 1100) — still
+                               // long enough to avoid cutting off mid-thought
 
 function clearCaptureInterim() {
   clearTimeout(captureInterimTimer);
