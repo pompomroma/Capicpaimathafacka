@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { q } = require('./db');
 const { requireAuth } = require('./middleware');
-const { CODEGEN_SYSTEM, CODEGEN_ARCHITECT } = require('./prompts');
+const { CODEGEN_SYSTEM, CODEGEN_ARCHITECT, CODEGEN_FILE } = require('./prompts');
 
 const CREATIONS_ROOT = path.resolve(__dirname, '..', 'data', 'creations');
 
@@ -39,9 +39,15 @@ const router = express.Router();
 const NIM_URL = process.env.NIM_URL || 'https://integrate.api.nvidia.com/v1/chat/completions';
 const MODEL = process.env.CODEGEN_MODEL || 'qwen/qwen3-coder-480b-a35b-instruct';
 
-const PER_CALL_TOKENS = 32768;  // per request (Qwen3-Coder-480B supports it)
-const ARCHITECT_TOKENS = 12288; // larger budget for the manifest stage
-const MAX_CONT_ROUNDS = 8;      // continuation rounds for the build stage
+// max_tokens is env-overridable because some NIM deployments reject very
+// large values. Per-file calls use a universally-safe budget; the single-
+// shot fallback uses a larger one.
+const PER_CALL_TOKENS = Number(process.env.CODEGEN_MAX_TOKENS) || 16384; // single-shot fallback
+const FILE_TOKENS = 8192;       // per individual file (plenty for one file)
+const ARCHITECT_TOKENS = 8192;  // manifest stage
+const FILE_CONCURRENCY = 3;     // files generated in parallel
+const MAX_FILE_CONT_ROUNDS = 3; // continuation rounds for a single huge file
+const MAX_CONT_ROUNDS = 8;      // continuation rounds for the single-shot fallback
 const MAX_RECOVERY_ROUNDS = 3;  // targeted missing-file/thin-file rounds
 const MAX_FILES = 50;
 const MAX_FILE_BYTES = 64 * 1024;
@@ -101,6 +107,63 @@ async function generateWithContinuation(systemPrompt, userPrompt, onRound) {
     if (finishReason !== 'length') break;
   }
   return full;
+}
+
+// Generate the complete content of ONE file in its own dedicated request.
+// One file per call = the model's full attention + budget on a single file,
+// so each file comes out complete instead of being compressed to fit
+// alongside the others. Cross-file consistency comes from the full manifest
+// passed in. Returns { path, content } or null.
+async function generateOneFile(goal, manifest, target) {
+  const roster = manifest.files.map(f => '- ' + f).join('\n');
+  const user = `App goal: ${goal}\n\n`
+    + `Project manifest:\nSTACK: ${manifest.stack}\nRUN: ${manifest.run}\nENTRY: ${manifest.entry}\n`
+    + `FILES:\n${roster}\n\n`
+    + `Now write ONLY this one file, complete and runnable, consistent with the manifest above:\n`
+    + `TARGET FILE: ${target}\n\n`
+    + `Output exactly one === FILE: ${target} === / === END FILE === block and nothing else.`;
+
+  let full = '';
+  let round = 0;
+  while (round < MAX_FILE_CONT_ROUNDS) {
+    round++;
+    const messages = [{ role: 'system', content: CODEGEN_FILE }];
+    if (full) {
+      messages.push({ role: 'user', content: user });
+      messages.push({ role: 'assistant', content: full });
+      messages.push({ role: 'user', content: 'Continue exactly where you left off. Do not repeat any text already emitted. Finish this single file and its === END FILE === marker.' });
+    } else {
+      messages.push({ role: 'user', content: user });
+    }
+    let res;
+    try { res = await callModelRaw(messages, FILE_TOKENS); }
+    catch { break; }
+    full += res.content;
+    if (res.finishReason !== 'length') break;
+  }
+
+  // Parse: prefer a proper block; otherwise treat the whole response as the
+  // file body (the model sometimes returns raw code with no markers).
+  const parsed = parseBlocks(full);
+  if (parsed?.files?.length) {
+    // Prefer the block whose path matches the target; else the longest.
+    const exact = parsed.files.find(f => f.path === cleanPath(target));
+    const chosen = exact || parsed.files.sort((a, b) => b.content.length - a.content.length)[0];
+    if (chosen && chosen.content.trim()) return { path: cleanPath(target), content: chosen.content };
+  }
+  const body = stripFences(full);
+  if (body.trim()) return { path: cleanPath(target), content: body };
+  return null;
+}
+
+// Strip leading/trailing markdown code fences and any stray === markers a
+// marker-less response may carry.
+function stripFences(s) {
+  let t = String(s || '');
+  const fence = t.match(/```[a-z0-9]*\n([\s\S]*?)```/i);
+  if (fence) t = fence[1];
+  t = t.replace(/^\s*===[^\n]*\n/, '').replace(/\n===[^\n]*\s*$/, '');
+  return t;
 }
 
 // ---------- parsers ----------
@@ -251,22 +314,51 @@ router.post('/codegen', requireAuth, async (req, res) => {
     if (aborted) return;
     send({ phase: 'architecture', stack: manifest.stack, run: manifest.run, files: manifest.files });
 
-    // ---- Stage B: build with continuation ----
-    const manifestText = manifest.files.length
-      ? `\n\nApproved manifest:\nSTACK: ${manifest.stack}\nRUN: ${manifest.run}\nENTRY: ${manifest.entry}\nFILES:\n${manifest.files.map(f => '- ' + f).join('\n')}\n\nEmit the complete content of every file above.`
-      : '';
-    const buildPrompt = `App goal: ${goal}${manifestText}`;
-    raw = await generateWithContinuation(CODEGEN_SYSTEM, buildPrompt, (round) => {
-      if (!aborted) {
-        const partial = parseBlocks(raw + '');
-        send({ phase: 'building', round, files: (partial?.files || []).map(f => f.path) });
-      }
-    });
-    if (aborted) return;
+    // ---- Stage B: per-file generation ----
+    // Generate each manifest file in its own dedicated request so the model
+    // writes each one completely instead of compressing them all into one
+    // answer. Bounded concurrency keeps total latency reasonable.
+    let parsed;
+    if (manifest.files.length) {
+      const targets = manifest.files.slice(0, MAX_FILES);
+      const total = targets.length;
+      const out = [];
+      let done = 0;
+      let idx = 0;
+      send({ phase: 'building', round: 1, done: 0, total, files: [] });
 
-    let parsed = parseBlocks(raw) || extractJson(raw);
+      async function worker() {
+        while (!aborted) {
+          const myIdx = idx++;
+          if (myIdx >= targets.length) return;
+          const target = targets[myIdx];
+          let file = null;
+          try { file = await generateOneFile(goal, manifest, target); } catch { file = null; }
+          if (aborted) return;
+          if (file && file.content && file.content.trim()) out.push(file);
+          done++;
+          send({ phase: 'building', done, total, file: target, files: out.map(f => f.path) });
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(FILE_CONCURRENCY, targets.length) }, worker));
+      if (aborted) return;
+
+      parsed = { files: sanitize(out), entry: manifest.entry, stack: manifest.stack, run: manifest.run, notes: manifest.notes };
+    } else {
+      // Fallback: architect produced no manifest — single-shot the whole project.
+      const buildPrompt = `App goal: ${goal}\n\nProduce the complete project.`;
+      raw = await generateWithContinuation(CODEGEN_SYSTEM, buildPrompt, (round) => {
+        if (!aborted) {
+          const partial = parseBlocks(raw + '');
+          send({ phase: 'building', round, files: (partial?.files || []).map(f => f.path) });
+        }
+      });
+      if (aborted) return;
+      parsed = parseBlocks(raw) || extractJson(raw);
+      if (parsed?.files?.length) parsed.files = sanitize(parsed.files);
+    }
+
     if (!parsed?.files?.length) return fail('model returned no parseable files', raw);
-    parsed.files = sanitize(parsed.files);
     if (!parsed.files.length) return fail('model emitted only empty files', raw);
 
     // ---- Stage C: completeness check + recovery ----

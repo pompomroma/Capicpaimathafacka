@@ -64,8 +64,14 @@ form.addEventListener('submit', async (e) => {
         const n = (p.files || []).length;
         setStatus(`Architecture ready${p.stack ? ' (' + p.stack + ')' : ''}: ${n} files. Generating code…`);
       } else if (p.phase === 'building') {
-        const done = (p.files || []).length;
-        setStatus(`Generating code… round ${p.round}, ${done} file${done === 1 ? '' : 's'} written.`);
+        if (typeof p.total === 'number') {
+          // Per-file progress: "Generating code… 6/15 files (sprites.js)"
+          const cur = p.file ? ` (${p.file})` : '';
+          setStatus(`Generating code… ${p.done}/${p.total} files${cur}`);
+        } else {
+          const done = (p.files || []).length;
+          setStatus(`Generating code… round ${p.round}, ${done} file${done === 1 ? '' : 's'} written.`);
+        }
       } else if (p.phase === 'verifying') {
         const miss = (p.missing || []).length;
         setStatus(`Filling in ${miss} remaining file${miss === 1 ? '' : 's'}…`);
