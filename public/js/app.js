@@ -328,6 +328,25 @@ function tryLocalCommand(text) {
     addSys(`Opening ${engine}${query ? ' for "' + query + '"' : ''}.`);
     return true;
   }
+  // Voice search on the popup: "search up X", "search for X", "look up X",
+  // Korean "X 검색" / "검색 X" / "X 찾아줘". Types the query into the open
+  // web popup (or opens the default engine) and loads results — no API key.
+  const searchMatch = t.match(/^(?:please\s+)?(?:search(?:\s+(?:up|for))?|look\s+up|google|find)\s+(.+)$/i);
+  if (searchMatch) {
+    const query = searchMatch[1].trim();
+    mb.search(query);
+    addSys(`Searching for "${query}".`);
+    return true;
+  }
+  const koSearchMatch = t.match(/^(?:(.+?)\s*(?:검색(?:해(?:줘|주세요)?)?|찾아(?:줘|주세요)?)|검색\s+(.+))$/);
+  if (koSearchMatch) {
+    const query = (koSearchMatch[1] || koSearchMatch[2] || '').trim();
+    if (query) {
+      mb.search(query);
+      addSys(`"${query}" 검색 중입니다.`);
+      return true;
+    }
+  }
   if (/^(?:please\s+)?(?:turn(?:\s+off)?|shut(?:\s+off|\s+down)?|disable|deactivate|kill|stop|end|exit|close|hide|dismiss)\s+(?:the\s+)?(?:web|browser|mini[\s-]?browser|web\s+browser|search)$/.test(t)) {
     mb.close();
     addSys('Browser closed.');

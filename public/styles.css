@@ -267,6 +267,23 @@ body::before {
   color: var(--cyan);
   border-bottom: 1px solid var(--line);
 }
+#mb-searchbar {
+  display: flex; gap: 0.3rem; align-items: center;
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid var(--line);
+  background: rgba(2, 12, 20, 0.6);
+}
+#mb-input {
+  flex: 1; min-width: 0;
+  background: rgba(0, 0, 0, 0.4); color: var(--cyan);
+  border: 1px solid var(--line); border-radius: 4px;
+  padding: 0.25rem 0.45rem;
+  font-size: clamp(0.62rem, 1.3vw, 0.78rem);
+  outline: none;
+}
+#mb-input::placeholder { color: rgba(120, 200, 220, 0.5); }
+#mb-input:focus { border-color: var(--cyan); }
+#mb-go { flex: 0 0 auto; }
 #mb-frame { flex: 1; border: 0; background: white; opacity: 0.92; }
 
 /* ============================================================
