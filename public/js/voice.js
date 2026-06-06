@@ -5,41 +5,51 @@
 import * as api from './api.js';
 
 const audioEl = document.getElementById('tts-audio');
+if (audioEl) { audioEl.muted = false; audioEl.volume = 1.0; }
 
-let actx = null;
-let analyser = null;
-let lastAmp = 0;
 let useFallback = false;
 let pickedVoice = null;
 let warmedUp = false;
+let lastAmp = 0;
 
-// ---------- Web Audio analyser for lip-sync ----------
-function ensureCtx() {
-  if (actx) return;
-  actx = new (window.AudioContext || window.webkitAudioContext)();
-  analyser = actx.createAnalyser();
-  analyser.fftSize = 256;
-  const srcNode = actx.createMediaElementSource(audioEl);
-  srcNode.connect(analyser);
-  analyser.connect(actx.destination);
-  const buf = new Uint8Array(analyser.frequencyBinCount);
-  function loop() {
-    if (!audioEl.paused) {
-      analyser.getByteTimeDomainData(buf);
-      let sum = 0;
-      for (let i = 0; i < buf.length; i++) {
-        const v = (buf[i] - 128) / 128;
-        sum += v * v;
-      }
-      lastAmp = Math.min(1, Math.sqrt(sum / buf.length) * 2.5);
+// ---------- lip-sync amplitude (synthetic, NO AudioContext) ----------
+//
+// The previous version routed audioEl through an AudioContext via
+// createMediaElementSource() so it could read real-time amplitude for
+// lip-sync. But Chrome creates new AudioContexts in 'suspended' state
+// until a user gesture explicitly resumes them — and while suspended,
+// any audio piped through is silenced WITH NO ERROR. The result was
+// Friday "speaking" successfully (onended fired) but completely silent
+// audio. The user-gesture resume in warmUp() never helped because
+// actx is created lazily inside ensureCtx, AFTER warmUp's listeners
+// have already removed themselves.
+//
+// Fix: do NOT pipe audioEl through AudioContext. Audio plays directly
+// through the browser's default audio path, which respects autoplay
+// gestures correctly. For lip-sync we synthesize amplitude from a
+// sine-wave + noise mix whenever something is playing — same pattern
+// the Web Speech fallback already used (since Web Speech audio is not
+// observable via Web Audio either).
+let ampRunning = false;
+function ensureAmpLoop() {
+  if (ampRunning) return;
+  ampRunning = true;
+  const t0 = performance.now();
+  function tick() {
+    const speaking = (audioEl && !audioEl.paused) ||
+                     !!(window.speechSynthesis && window.speechSynthesis.speaking);
+    if (speaking) {
+      const t = (performance.now() - t0) / 180;
+      lastAmp = 0.32 + 0.28 * Math.abs(Math.sin(t)) + 0.12 * Math.random();
     } else {
       lastAmp *= 0.85;
     }
     window.dispatchEvent(new CustomEvent('friday:amp', { detail: lastAmp }));
-    requestAnimationFrame(loop);
+    requestAnimationFrame(tick);
   }
-  loop();
+  tick();
 }
+function ensureCtx() { ensureAmpLoop(); }
 
 // ---------- voice picker (English + Korean) ----------
 const EN_PREFERRED_VOICES = [
@@ -106,14 +116,23 @@ if (typeof window !== 'undefined' && window.speechSynthesis) {
 function warmUp() {
   if (warmedUp) return;
   warmedUp = true;
+  // Silent SpeechSynthesisUtterance on first user gesture unlocks the
+  // speech engine for the rest of the session (Chrome/Safari autoplay).
   try {
     const u = new SpeechSynthesisUtterance(' ');
     u.lang = 'en-US';
     u.volume = 0;
     window.speechSynthesis.speak(u);
   } catch {}
-  // Resume an AudioContext that was suspended due to autoplay policy.
-  try { actx?.resume?.(); } catch {}
+  // Force the <audio> element to "play" once on the user gesture so future
+  // src changes can play without an autoplay rejection.
+  try {
+    if (audioEl) {
+      audioEl.muted = false; audioEl.volume = 1.0;
+      const wakePlay = audioEl.play();
+      if (wakePlay && typeof wakePlay.then === 'function') wakePlay.then(() => audioEl.pause(), () => {});
+    }
+  } catch {}
 }
 if (typeof window !== 'undefined') {
   const onFirstGesture = () => {
@@ -218,7 +237,11 @@ function speakSentenceWebSpeech(text, lang) {
 function speakFallback(text, lang) {
   const utteranceLang = lang || detectLang(text);
   return new Promise(async (resolve) => {
-    try { window.speechSynthesis?.cancel?.(); } catch {}
+    // DO NOT call speechSynthesis.cancel() here — Chrome has a known bug
+    // where a speak() call immediately after a cancel() is silently
+    // dropped. The drain loop awaits each speakFallback, so there is no
+    // overlap to cancel anyway. stopSpeaking() still cancels explicitly
+    // (that's a different code path: user wants to barge in).
     window.dispatchEvent(new CustomEvent('friday:speaking', { detail: true }));
     let synthRunning = true;
     const start = performance.now();
