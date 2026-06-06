@@ -230,14 +230,25 @@ function speakFallback(text, lang) {
       requestAnimationFrame(fakeLoop);
     };
     fakeLoop();
-    // Speak the whole chunk as ONE utterance — Web Speech handles the
-    // internal sentence prosody, and a single utterance avoids the audible
-    // gaps that one-utterance-per-sentence produced. Only split a very long
-    // chunk (> 320 chars) to keep each utterance's duration bounded so the
-    // onend-timeout safety stays meaningful.
-    const segments = text.length > 320 ? splitSentences(text) : [text];
-    for (const s of segments) {
-      await speakSentenceWebSpeech(s, utteranceLang);
+    // Always speak SENTENCE-BY-SENTENCE so each utterance stays short.
+    // Speaking a whole 150-300 char chunk as one utterance triggers
+    // Chrome's well-documented "speechSynthesis stalls after ~15s" bug —
+    // mid-utterance the audio goes silent and subsequent utterances never
+    // play. Short per-sentence utterances avoid this entirely, and the
+    // browser-internal gap between them is small enough to be inaudible.
+    const sentences = splitSentences(text);
+    // Chrome resume()-keepalive workaround: while we're speaking, poke
+    // speechSynthesis.resume() every 5 s so it does not enter the stalled
+    // state even if a single utterance happens to be long.
+    const keepAlive = setInterval(() => {
+      try { window.speechSynthesis.resume(); } catch {}
+    }, 5000);
+    try {
+      for (const s of sentences) {
+        await speakSentenceWebSpeech(s, utteranceLang);
+      }
+    } finally {
+      clearInterval(keepAlive);
     }
     synthRunning = false;
     window.dispatchEvent(new CustomEvent('friday:speaking', { detail: false }));
